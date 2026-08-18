@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIDISA Portal &mdash; Live Demo</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ===================== LOGIN VIEW ===================== -->
+  <div id="loginView" class="login-screen">
+    <div class="login-card">
+      <div class="brand">AIDISA Portal</div>
+      <p class="demo-flag">DEMO ONLY &mdash; all data is synthetic, no real/live data is fetched</p>
+      <form id="loginForm">
+        <label>Email
+          <input id="loginEmail" type="text" value="admin@demo.local" autocomplete="username" />
+        </label>
+        <label>Password
+          <input id="loginPassword" type="password" value="demo" autocomplete="current-password" />
+        </label>
+        <button type="submit" class="btn btn-primary btn-block">Log in</button>
+      </form>
+      <p class="hint">Any password works &mdash; this demo never checks credentials against a real server.</p>
+    </div>
+  </div>
+
+  <!-- ===================== APP VIEW ===================== -->
+  <div id="appView" class="app-shell hidden">
+
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="brand-mark">AIDISA</span>
+        <span class="badge-demo">DEMO &middot; synthetic data</span>
+      </div>
+      <nav class="tabs">
+        <button class="tab-btn active" data-tab="situational">Situational Awareness</button>
+        <button class="tab-btn" data-tab="assignment">Case Assignment</button>
+      </nav>
+      <div class="topbar-right">
+        <button id="resetDemoBtn" class="btn btn-ghost">Reset demo</button>
+        <button id="logoutBtn" class="btn btn-ghost">Log out</button>
+      </div>
+    </header>
+
+    <div class="live-bar" id="liveBarOk">
+      <div class="live-bar-left">
+        <span class="dot" id="liveDot"></span>
+        <span id="liveStatusText">Lightweight demo mode</span>
+        <span id="lastEventTag" class="tag hidden"></span>
+      </div>
+      <div class="live-bar-right">
+        <label class="inline-field">Generate every
+          <select id="intervalSelect">
+            <option value="5">5s</option>
+            <option value="10" selected>10s</option>
+            <option value="15">15s</option>
+            <option value="30">30s</option>
+          </select>
+        </label>
+        <label class="inline-field">
+          <input type="checkbox" id="liveToggle" /> Live
+        </label>
+        <label class="inline-field">Advance by
+          <select id="advanceSelect">
+            <option value="0" selected>Now</option>
+            <option value="15">+15s</option>
+            <option value="30">+30s</option>
+            <option value="60">+60s</option>
+            <option value="120">+120s</option>
+            <option value="300">+300s</option>
+            <option value="600">+600s</option>
+          </select>
+        </label>
+        <button id="generateNowBtn" class="btn btn-primary">Generate now</button>
+      </div>
+    </div>
+
+    <!-- ---------- Situational Awareness ---------- -->
+    <section id="situationalView" class="view">
+      <div class="stat-row">
+        <div class="stat-card"><div class="stat-value" id="statFeedback">0</div><div class="stat-label">Feedback processed</div></div>
+        <div class="stat-card"><div class="stat-value" id="statAlerts">0</div><div class="stat-label">Active high-severity alerts</div></div>
+        <div class="stat-card"><div class="stat-value" id="statAssigned">0</div><div class="stat-label">Assigned cases</div></div>
+        <div class="stat-card"><div class="stat-value" id="statStaff">0</div><div class="stat-label">Available staff</div></div>
+      </div>
+
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-head">
+            <h3>Feedback Trend</h3>
+            <div class="card-controls">
+              <label>Interval (min) <input type="number" id="trendInterval" min="1" value="5" class="num-input" /></label>
+              <label>Window (min) <input type="number" id="trendWindow" min="5" value="60" class="num-input" /></label>
+            </div>
+          </div>
+          <p class="card-sub">High-severity feedback counts, bucketed into equal time intervals.</p>
+          <div id="trendChart" class="chart chart-bars"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>Event Surge Tracker</h3>
+            <div class="card-controls">
+              <label>Window (min) <input type="number" id="surgeWindow" min="5" value="60" class="num-input" /></label>
+              <label>Min count <input type="number" id="surgeMinCount" min="1" value="1" class="num-input" /></label>
+            </div>
+          </div>
+          <p class="card-sub">Sudden public-commute incident keywords detected in feedback text.</p>
+          <div id="surgeChart" class="chart chart-hbars"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Critical Records</h3>
+        <p class="card-sub">High-severity feedback received within the trend window above.</p>
+        <div class="table-wrap">
+          <table id="criticalTable">
+            <thead><tr><th>Time</th><th>Title</th><th>Location</th><th>Keywords</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- Case Assignment ---------- -->
+    <section id="assignmentView" class="view hidden">
+      <div class="card-grid">
+        <div class="card">
+          <h3>Workload by staff</h3>
+          <div class="table-wrap">
+            <table id="workloadTable">
+              <thead><tr><th>Staff</th><th>Assigned cases</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <h3>All cases</h3>
+          <div class="table-wrap">
+            <table id="caseTable">
+              <thead><tr><th>Time</th><th>Title</th><th>Severity</th><th>Assigned to</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ---------- Case detail dialog ---------- -->
+  <dialog id="detailDialog" class="detail-dialog">
+    <form method="dialog">
+      <h3 id="detailTitle"></h3>
+      <dl id="detailBody" class="detail-list"></dl>
+      <button class="btn btn-primary" type="submit">Close</button>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
