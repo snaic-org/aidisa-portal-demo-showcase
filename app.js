@@ -451,7 +451,10 @@
       var raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         var parsed = JSON.parse(raw);
-        if (parsed && parsed.feedback && parsed.settings) return parsed;
+        if (parsed && parsed.feedback && parsed.settings) {
+          catchUpClock(parsed);
+          return parsed;
+        }
       }
     } catch (e) { /* fall through to reseed */ }
     var fresh = seedData();
@@ -460,7 +463,38 @@
   }
 
   function saveData(data) {
+    data.savedAt = Date.now();
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (e) { /* storage full or blocked */ }
+  }
+
+  // The charts only look at the last few minutes, so saved demo data would
+  // look empty after a visitor has been away. Treat time as paused while the
+  // page was closed: move every stored timestamp forward by the gap.
+  function catchUpClock(data) {
+    var gap = Date.now() - (data.savedAt || latestTimestamp(data));
+    if (!(gap > 60000)) return;
+    function iso(v) { return v ? new Date(new Date(v).getTime() + gap).toISOString() : v; }
+    data.feedback.forEach(function (f) {
+      ["createdon", "receivedon", "processedon", "assigned_on"].forEach(function (k) { f[k] = iso(f[k]); });
+      if (f.stageStartedAt) f.stageStartedAt += gap;
+      if (f.stageEndsAt) f.stageEndsAt += gap;
+      if (f.assign_trace) {
+        f.assign_trace.at = iso(f.assign_trace.at);
+        f.assign_trace.rows.forEach(function (r) { if (r.lastAssigned !== null) r.lastAssigned += gap; });
+      }
+    });
+    (data.alerts || []).forEach(function (a) {
+      a.triggeredon = iso(a.triggeredon);
+      a.resolvedon = iso(a.resolvedon);
+      a.history.forEach(function (h) { h.at = iso(h.at); });
+    });
+    saveData(data);
+  }
+
+  function latestTimestamp(data) {
+    return data.feedback.reduce(function (max, f) {
+      return Math.max(max, new Date(f.processedon || f.receivedon || f.createdon).getTime() || 0);
+    }, 0);
   }
 
   function receiveFeedback(incoming, createdOnIso) {
