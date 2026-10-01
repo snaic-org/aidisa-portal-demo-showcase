@@ -33,7 +33,7 @@
     pie: "This sentiment label proportions shows you the number of sentiment in each sentiment band based on the filtered data on this page.",
     gauge: "This feedback sentiment intensity shows you sentiment ranging from 1-5 based on the filtered data on this page.",
     map: "This sentiment map shows the sentiment of each MRT and LRT station with their respective colors. The more red the point is, the more negative the feedback; the more green, the more positive.",
-    time: "This sentiment timeline shows you the sentiment over the number of reports daily based on the filtered data on this page.",
+    time: "This sentiment timeline shows you the sentiment over the number of reports daily based on the filtered data on this page. Click a coloured segment to show only that sentiment across all days; click the blue line or a date to select a day.",
     table: "This table shows the raw report from CDE. Click a row to see its full description and sentiment below.",
     daily: "Allows you to view the chart in a daily format based on the selected date range at the top.",
     monthly: "Allows you to view the chart in a monthly format based on the selected date range at the top.",
@@ -52,6 +52,8 @@
     division: -1, station: -1, main: -1, sub: -1, subsub: -1, type: "all",
     from: 31, to: 58,
     sel: null,
+    day: -1, // selected day on the timeline; combines with sel
+    pin: -1, // station picked on the map; combines with sel and day
     timeMode: "day", timeMetric: "volume",
     drill: null,
     row: null
@@ -179,12 +181,10 @@
   function selMatch(i, sel) {
     if (sel.kind === "label") return C.l[i] === sel.l;
     if (sel.kind === "sub") return C.s[i] === sel.s && C.l[i] === sel.l;
-    if (sel.kind === "day") return C.d[i] === sel.d;
-    if (sel.kind === "station") return C.a[i] === sel.a;
     return true;
   }
 
-  function matches(i, skip, useSel) {
+  function matches(i, skip, useSel, useDay, usePin) {
     if (C.d[i] < state.from || C.d[i] > state.to) return false;
     if (skip !== "division" && state.division >= 0 && C.v[i] !== state.division) return false;
     if (skip !== "station" && state.station >= 0 && C.a[i] !== state.station) return false;
@@ -193,13 +193,15 @@
     if (skip !== "main" && skip !== "sub" && state.sub >= 0 && C.s[i] !== state.sub) return false;
     if (skip !== "main" && skip !== "sub" && skip !== "subsub" && state.subsub >= 0 && C.ss[i] !== state.subsub) return false;
     if (useSel && state.sel && !selMatch(i, state.sel)) return false;
+    if (useDay && state.day >= 0 && C.d[i] !== state.day) return false;
+    if (usePin && state.pin >= 0 && C.a[i] !== state.pin) return false;
     return true;
   }
 
-  function aggregate(useSel) {
+  function aggregate(useSel, useDay, usePin) {
     var agg = { total: 0, sum: 0, labels: [0, 0, 0, 0, 0], bySub: {}, byStation: {}, byDay: {} };
     for (var i = 0; i < N; i++) {
-      if (!matches(i, null, useSel)) continue;
+      if (!matches(i, null, useSel, useDay, usePin)) continue;
       var n = C.n[i], l = C.l[i];
       agg.total += n;
       agg.sum += n * l;
@@ -239,6 +241,8 @@
       if (kind === "main") { state.sub = -1; state.subsub = -1; }
       if (kind === "sub") state.subsub = -1;
       state.sel = null;
+      state.day = -1;
+      state.pin = -1;
       state.row = null;
       renderAll();
     });
@@ -260,6 +264,8 @@
         state[key] = idx;
         if (state.from > state.to) { var t = state.from; state.from = state.to; state.to = t; }
         state.sel = null;
+        state.day = -1;
+        state.pin = -1;
         state.row = null;
         renderAll();
       });
@@ -294,9 +300,7 @@
   function buildOverview() {
     var P = $("pageOverview");
 
-    // Header. The report places the SIT x NVIDIA joint-centre logo beside
-    // this; only the AiDiSA wordmark is used here.
-    V(P, 560, 16, 160, 36, "center b", '<span style="color:#D64550">AiDiSA</span>', 21.33).style.lineHeight = "36px";
+    // The AiDiSA wordmark lives in the portal navbar, not on the canvas.
 
     // Filter bar
     V(P, 16, 64, 1248, 120, "card");
@@ -315,6 +319,8 @@
         state.type = q[0];
         state.station = -1;
         state.sel = null;
+        state.day = -1;
+        state.pin = -1;
         renderAll();
       });
       b.style.setProperty("--fs", 14);
@@ -352,7 +358,7 @@
     V(P, 16, 440, 512, 264, "card");
     titles(P, 16, 440, 512, "STATION-BASED SENTIMENT MAP", "SHOWING SENTIMENT RADER FOR STATIONS ONLY");
     ov.drillStation = button(P, 306, 445, 160, 32, "disabled", "Drilldown to MRT station", HELP.drillStation, function () {
-      if (state.sel && state.sel.kind === "station") location.hash = "#station/" + encodeURIComponent(D.dims.incident_at[state.sel.a]);
+      if (state.pin >= 0) location.hash = "#station/" + encodeURIComponent(D.dims.incident_at[state.pin]);
     });
     helpButton(P, 480, 448, 48, 32, HELP.map);
     ov.mapEl = V(P, 26, 479, 487, 208, "map");
@@ -375,11 +381,11 @@
     ov.daily = button(P, 874, 445, 112, 32, "", "Daily View", HELP.daily, function () { state.timeMode = "day"; renderTimelineOnly(); });
     ov.monthly = button(P, 990, 445, 112, 32, "", "Monthly View", HELP.monthly, function () {
       state.timeMode = "month";
-      if (state.sel && state.sel.kind === "day") state.sel = null;
+      state.day = -1;
       renderOverview(false);
     });
     ov.drillDay = button(P, 1107, 445, 112, 32, "disabled", "Drilldown to day", HELP.drillDay, function () {
-      if (state.sel && state.sel.kind === "day") location.hash = "#day/" + isoDay(state.sel.d);
+      if (state.day >= 0) location.hash = "#day/" + isoDay(state.day);
     });
     helpButton(P, 1224, 445, 32, 32, HELP.time);
     ov.timeLegend = V(P, 546, 481, 700, 14, "legend", "", 10.67);
@@ -396,9 +402,16 @@
     });
     charts.pie.on("click", function (p) { toggleSel({ kind: "label", l: p.data.l }); });
     charts.time.on("click", function (p) {
-      if (state.timeMode !== "day" || p.componentType !== "series") return;
-      var pt = ov.points[p.dataIndex];
-      if (pt) toggleSel({ kind: "day", d: pt.key });
+      // Coloured segment: show that sentiment for every day.
+      if (p.componentType === "series" && state.timeMetric === "volume" && p.seriesIndex < NAMES.length) {
+        toggleSel({ kind: "label", l: p.seriesIndex + 1 });
+        return;
+      }
+      // Blue line, score bar or date label: select that day (daily view only).
+      if (state.timeMode !== "day") return;
+      var idx = p.componentType === "xAxis" ? ov.points.findIndex(function (x) { return x.label === p.value; }) : p.dataIndex;
+      var pt = ov.points[idx];
+      if (pt) toggleDay(pt.key);
     });
 
     initMap();
@@ -418,8 +431,18 @@
 
   function toggleSel(sel) {
     var cur = state.sel;
-    var same = cur && cur.kind === sel.kind && cur.l === sel.l && cur.s === sel.s && cur.d === sel.d && cur.a === sel.a;
+    var same = cur && cur.kind === sel.kind && cur.l === sel.l && cur.s === sel.s && cur.a === sel.a;
     state.sel = same ? null : sel;
+    renderOverview();
+  }
+
+  function togglePin(a) {
+    state.pin = state.pin === a ? -1 : a;
+    renderOverview();
+  }
+
+  function toggleDay(d) {
+    state.day = state.day === d ? -1 : d;
     renderOverview();
   }
 
@@ -429,6 +452,8 @@
     state.from = DEFAULT_RANGE.from;
     state.to = DEFAULT_RANGE.to;
     state.sel = null;
+    state.day = -1;
+    state.pin = -1;
     renderAll();
   }
 
@@ -582,7 +607,7 @@
     ov.mapMsg.hidden = stationsOnly;
     ov.mapEl.style.visibility = stationsOnly ? "visible" : "hidden";
     bubbleLayer.clearLayers();
-    var sel = state.sel && state.sel.kind === "station" ? state.sel.a : -1;
+    var sel = state.pin;
     var pts = [];
     Object.keys(agg.byStation).map(Number).forEach(function (a) {
       var code = D.dims.incident_at[a];
@@ -600,7 +625,7 @@
           e.originalEvent.clientX, e.originalEvent.clientY);
       });
       m.on("mouseout", hideTip);
-      m.on("click", function (e) { L.DomEvent.stopPropagation(e); toggleSel({ kind: "station", a: a }); });
+      m.on("click", function (e) { L.DomEvent.stopPropagation(e); togglePin(a); });
       m.addTo(bubbleLayer);
       pts.push([info.lat, info.lng]);
     });
@@ -613,7 +638,7 @@
     var s = scale;
     var daily = state.timeMode === "day";
     var score = state.timeMetric === "score";
-    var sel = state.sel && state.sel.kind === "day" ? state.sel.d : -1;
+    var sel = state.day;
     ov.timeTitle.textContent = "SENTIMENT TIMELINE (" + (daily ? "DAILY" : "MONTHLY") + ")";
     ov.timeSub.textContent = score ? "SENTIMENT SCORE TREND" : "FEEDBACK VOLUME TREND";
     ov.knob.style.setProperty("--x", score ? 820 : 808);
@@ -699,7 +724,7 @@
         return tipRows(rows);
       } }, echartsTip),
       xAxis: {
-        type: "category", data: points.map(function (p) { return p.label; }),
+        type: "category", data: points.map(function (p) { return p.label; }), triggerEvent: daily,
         axisLabel: { fontSize: 10.67 * s, color: INK2, margin: 8 * s, interval: daily ? function (i) { return points[i].sunday; } : 0 },
         axisTick: { show: false }, axisLine: { show: false },
         name: "INCIDENT DATES", nameLocation: "middle", nameGap: 22 * s, nameTextStyle: { fontSize: 12 * s, color: INK, fontWeight: "bold" }
@@ -719,24 +744,25 @@
   }
 
   function renderTimelineOnly() {
-    var agg = state.sel && state.sel.kind !== "day" ? aggregate(true) : aggregate(false);
-    renderTimeline(agg);
+    renderTimeline(aggregate(true, false, true));
   }
 
   function renderOverview(refitMap) {
-    var all = aggregate(false);
-    var withSel = state.sel ? aggregate(true) : all;
+    // Each visual is filtered by every selection except its own, so the
+    // clicked visual keeps its context (highlighted) while the rest follow.
     var kind = state.sel ? state.sel.kind : null;
-    renderSub(kind === "sub" || kind === "label" ? all : withSel);
-    renderPie(kind === "label" ? all : withSel);
+    var withSel = aggregate(true, true, true);
+    var noSel = aggregate(false, true, true);
+    renderSub(kind === "sub" || kind === "label" ? noSel : withSel);
+    renderPie(kind === "label" ? noSel : withSel);
     renderGauge(withSel);
-    renderMap(kind === "station" ? all : withSel, refitMap);
-    renderTimeline(kind === "day" ? all : withSel);
+    renderMap(aggregate(true, true, false), refitMap);
+    renderTimeline(aggregate(true, false, true));
     ov.subLegend.querySelectorAll("[data-l]").forEach(function (el) {
       el.classList.toggle("off", kind === "label" && Number(el.getAttribute("data-l")) !== state.sel.l);
     });
     ov.quick.forEach(function (b) { b.classList.toggle("on", b.dataset.type === state.type); });
-    ov.drillStation.className = "v btn t " + (kind === "station" ? "solid" : "disabled");
+    ov.drillStation.className = "v btn t " + (state.pin >= 0 ? "solid" : "disabled");
   }
 
   // ---------------------------------------------------------------------
@@ -792,6 +818,61 @@
   }
   function one(r, arr) { return arr[Math.floor(r() * arr.length)]; }
 
+  // ---- Raw feedback text shared with the portal (samples.js) -----------
+  // Cases borrow the same WhatsApp / email / call-note / web-form text the
+  // Situational Awareness view uses, matched on sentiment and category.
+  var SAMPLE_SOURCE = { "WhatsApp (SNAP)": "Whatsapp", "Email": "Email", "Web Form": "Web Form", "Phone (CSR note)": "Phone - incoming",
+    "Social Media": "Social media", "Station Report": "Feedback Form", "Live IFS Feed": "Feedback Form" };
+  var SAMPLE_POOLS = (function () {
+    var S = window.AIDISA_SAMPLES;
+    var pools = { pos: [], neutral: [], neg: [], vneg: [] };
+    if (!S) return pools;
+    function add(title, text, source, kind) {
+      var item = { title: title, text: text, source: SAMPLE_SOURCE[source] || "Web Form" };
+      var pos = /compliment|thank you for helping|helped|returned|helpful/i.test(title);
+      var strong = /!!|complaint|rude|unacceptable|angry|sia\b|dangerous|sauna|bbq|ridiculous|wat is going on|cannot tahan/i.test(text);
+      if (pos) { pools.pos.push(item); return; }
+      if (kind === "routine") pools.neutral.push(item);
+      pools.neg.push(item);
+      if (strong || kind === "incident") pools.vneg.push(item);
+    }
+    S.seeds.forEach(function (x) { add(x[0], x[1], x[4], "routine"); });
+    S.routines.forEach(function (x) { add(x.title, x.description, x.source_at, "routine"); });
+    S.incidents.forEach(function (x) { add(x.title, x.description, x.source_at, "incident"); });
+    S.scenarios.forEach(function (sc) { sc.reports.forEach(function (x) { add(x[0], x[1], x[2], "incident"); }); });
+    return pools;
+  })();
+  var SUB_HINTS = [
+    [/air-?con/i, /aircon/i],
+    [/door/i, /door/i],
+    [/escalator|lift/i, /escalator|lift/i],
+    [/burning/i, /burning/i],
+    [/toilet/i, /toilet|tissue/i],
+    [/dwell|frequency|delay|^TD|operational/i, /track fault|stuck|stop|bridging/i],
+    [/cleanliness/i, /dirty|clean|water|leak/i],
+    [/information|STARIS|announcement|signage/i, /announcement|screen|sign|exit/i],
+    [/handling of passengers|customer service|rule enforcement|behaviour/i, /staff|rude|security|officer/i]
+  ];
+  function fillSampleTokens(text, when) {
+    function hhmm(extra) {
+      var x = new Date(when.getTime() + extra * 60000);
+      return pad(x.getHours()) + ":" + pad(x.getMinutes());
+    }
+    return text.replace(/\{t(\d*)\}/g, function (m, n) { return hhmm(Number(n) || 0); })
+      .replace(/\{d\}/g, pad(when.getDate()) + "/" + pad(when.getMonth() + 1) + "/" + when.getFullYear());
+  }
+  function pickSample(r, label, sub, subsub) {
+    var tone = label >= 4 ? "pos" : label === 3 ? "neutral" : label === 2 ? "neg" : "vneg";
+    var pool = SAMPLE_POOLS[tone];
+    if (!pool.length) return null;
+    var hint = SUB_HINTS.find(function (h) { return h[0].test(sub) || h[0].test(subsub); });
+    if (hint) {
+      var narrowed = pool.filter(function (x) { return hint[1].test(x.title + " " + x.text); });
+      if (narrowed.length) pool = narrowed;
+    }
+    return one(r, pool);
+  }
+
   // Build one synthetic case from aggregated row i, copy k.
   function makeCase(i, k) {
     var r = rng(i * 7919 + k * 104729 + 17);
@@ -828,10 +909,15 @@
       body = "I am writing to feed back that " + (ISSUES[sub] || "the service did not meet my expectations") + " at " + place + ". " +
         (label === 1 ? "This is unacceptable and I would like a reply as soon as possible." : "I hope this can be looked into.");
     }
+    var sample = pickSample(r, label, sub, subsub);
+    if (sample) {
+      title = sample.title;
+      body = fillSampleTokens(sample.text, created);
+    }
     var sent = new Date(created.getTime() - 3600000);
     var sentText = WEEKDAYS[sent.getDay()] + ", " + MONTHS_LONG[sent.getMonth()] + " " + sent.getDate() + ", " + sent.getFullYear() + " " +
       pad(sent.getHours() % 12 || 12) + ":" + pad(sent.getMinutes()) + " " + (sent.getHours() >= 12 ? "PM" : "AM");
-    var description = "SYNTHETIC SAMPLE - not a real case.\n\nSent : " + sentText + "\nType : " + (compliment ? "Compliment" : feedback) +
+    var description = sample ? body : "Sent : " + sentText + "\nType : " + (compliment ? "Compliment" : feedback) +
       "\nDivision : " + (isBus ? "Bus" : "Train") + "\nFull name : Demo Customer " + pad(Math.floor(r() * 9000) + 1000, 4) +
       "\nEmail address : ****@***.**\n\n" + body;
 
@@ -847,7 +933,7 @@
       incidentAt: code === "Unspecified" ? "" : code,
       parentDivision: division === "Unspecified" ? "" : division,
       feedback: feedback,
-      source: pick(r, SOURCES),
+      source: sample ? sample.source : pick(r, SOURCES),
       status: compliment ? pick(r, STATUS_COMPLIMENT) : pick(r, STATUS_CASE),
       main: main === "Unspecified" ? "" : main,
       sub: sub === "Unspecified" ? "" : sub,
@@ -962,7 +1048,7 @@
     }
     if (dk.kind === "station") return C.a[i] === dk.a && matches(i, "station", false) &&
       (state.type === "all" || state.type === "station");
-    return matches(i, null, true);
+    return matches(i, null, true, true, true);
   }
 
   function renderDrill() {
@@ -1050,6 +1136,8 @@
     state.row = null;
     $("pageOverview").hidden = !!drill;
     $("pageDrill").hidden = !drill;
+    // The overview has no header row any more, so it uses a shorter canvas.
+    $("canvas").classList.toggle("is-overview", !drill);
     if (drill) {
       if (drill.kind !== prevKind) buildDrillFilters(drill.kind);
       renderDrill();

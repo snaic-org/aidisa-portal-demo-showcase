@@ -23,7 +23,8 @@
     "injury", "injured", "fire", "smoke", "weapon", "threat", "fell", "collapsed", "slippery",
     "train door", "platform edge", "breakdown", "collision", "emergency", "assault", "violent",
     "harassment", "molest", "suicide", "trespass", "track intrusion", "unattended bag",
-    "suspicious bag", "suspicious item", "explosion", "flood", "electrocut"
+    "suspicious bag", "suspicious item", "explosion", "flood", "electrocut", "burning smell",
+    "track fault", "signal fault", "train fault", "power fault"
   ];
 
   var INCIDENT_KEYWORD_PHRASES = [
@@ -39,17 +40,111 @@
     "escalator fault", "escalator breakdown", "lift breakdown", "lift trapped", "lift fault",
     "theft", "pickpocket", "lost property", "lost item",
     "public nuisance", "intoxicated passenger", "verbal dispute",
-    "obstruction", "delay", "service disruption", "collision"
+    "obstruction", "delay", "service disruption", "collision",
+    "track fault", "train fault", "no aircon", "escalator jerk"
   ];
+
+  // Assumption used to contrast AI detection with a manual inbox review.
+  var MANUAL_REVIEW_MIN = 15;
+
+  var SUGGESTED_ACTIONS = {
+    "burning smell": "Ask the control centre to hold the train at the next station, send engineers to inspect it, and tell passengers what is happening.",
+    "track fault": "Notify the operations control centre, start bridging buses, and put staff on platforms with clear updates and travel chits.",
+    "train door": "Notify the control centre, check the door closing time and sensors on the affected line, and follow up with injured passengers.",
+    "no aircon": "Log the train car numbers, ask engineering to inspect the air-conditioning, and withdraw the cars if the fault is confirmed.",
+    "escalator fault": "Stop the escalator, put up a barrier, and ask engineering to inspect it before it is used again.",
+    "smoke": "Dispatch station staff to the platform, alert the control centre, and prepare a passenger advisory.",
+    "fire": "Dispatch station staff, alert the control centre, and prepare an evacuation advisory.",
+    "signal fault": "Notify the operations control centre, check the affected line segment, and prepare a service-disruption advisory.",
+    "signal failure": "Notify the operations control centre and prepare a service-disruption advisory.",
+    "train breakdown": "Notify the operations control centre, arrange recovery, and publish a delay advisory.",
+    "power fault": "Notify engineering, check traction power, and publish a delay advisory.",
+    "medical emergency": "Send first-aid staff and call emergency services.",
+    "suspicious bag": "Alert security, cordon off the area, and follow the unattended-item procedure.",
+    "unattended bag": "Alert security, cordon off the area, and follow the unattended-item procedure.",
+    "flooding": "Dispatch maintenance, block off affected areas, and warn passengers of slippery floors.",
+    "physical assault": "Alert security and the police, and send staff to the location."
+  };
+
+  function suggestedAction(alert) {
+    return SUGGESTED_ACTIONS[alert.keyword] ||
+      (alert.level === "critical"
+        ? "Notify the duty manager, send staff to the listed locations, and review the linked reports."
+        : "Review the linked reports and watch the trend; escalate if the count keeps rising.");
+  }
+
+  function detectionLatency(data, alert) {
+    var times = alert.records.map(function (g) {
+      var r = findRecord(data, g);
+      return r ? new Date(r.createdon).getTime() : NaN;
+    }).filter(function (t) { return !isNaN(t); });
+    if (!times.length) return null;
+    var first = Math.min.apply(null, times);
+    return { firstIso: new Date(first).toISOString(), ms: Math.max(0, new Date(alert.triggeredon).getTime() - first) };
+  }
+
+  function highlightTerms(text, terms) {
+    var list = terms.filter(Boolean).sort(function (a, b) { return b.length - a.length; });
+    if (!list.length) return escapeHtml(text);
+    var re = new RegExp("(" + list.map(function (t) { return t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }).join("|") + ")", "ig");
+    return text.split(re).map(function (part, i) {
+      return i % 2 ? '<mark class="ai-mark">' + escapeHtml(part) + "</mark>" : escapeHtml(part);
+    }).join("");
+  }
+
+  // Fills {t}, {t1}.. and {d} tokens in raw channel text with the receive time.
+  function fillTokens(text, ms) {
+    var d = new Date(ms);
+    function hhmm(extra) {
+      var x = new Date(ms + extra * 60000);
+      return String(x.getHours()).padStart(2, "0") + ":" + String(x.getMinutes()).padStart(2, "0");
+    }
+    return String(text || "")
+      .replace(/\{t(\d*)\}/g, function (m, n) { return hhmm(Number(n) || 0); })
+      .replace(/\{d\}/g, String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0") + "/" + d.getFullYear());
+  }
 
   function recordText(record) {
     return ((record.title || "") + " " + (record.description || "")).toLowerCase();
   }
 
+  // Service-affecting but not safety-critical.
+  var MEDIUM_SEVERITY_TERMS = [
+    "lift fault", "escalator fault", "escalator jerk", "water leak", "no aircon", "delay",
+    "crowding", "overcrowded", "stuck", "lift breakdown"
+  ];
+
   function detectSeverity(text) {
-    var matched = HIGH_SEVERITY_TERMS.filter(function (term) { return text.indexOf(term) !== -1; });
-    return { severity_level: matched.length ? "high" : "low", keyevent_monitor_matched: matched.join(", ") };
+    function hits(list) { return list.filter(function (term) { return text.indexOf(term) !== -1; }); }
+    var high = hits(HIGH_SEVERITY_TERMS);
+    if (high.length) return { severity_level: "high", keyevent_monitor_matched: high.join(", ") };
+    var medium = hits(MEDIUM_SEVERITY_TERMS);
+    return { severity_level: medium.length ? "medium" : "low", keyevent_monitor_matched: medium.join(", ") };
   }
+
+  // Sentiment index, 1 (Very Negative) to 5 (Very Positive). In production
+  // this is TranSent-X (Transport Sentiment Experience), a fine-tuned RoBERTa
+  // model; the demo approximates it with simple cues so it runs offline.
+  var SENTIMENT_NAMES = ["", "Very Negative", "Negative", "Neutral", "Positive", "Very Positive"];
+  function scoreSentiment(record) {
+    // Ignore operator replies and email boilerplate - only the customer's words count.
+    var text = recordText(record).split(/\n/).filter(function (line) {
+      return !/smrt snap rep|caution: this email originated/.test(line);
+    }).join(" ");
+    // Praise needs real compliment wording; a polite "thanks" at the end of a
+    // complaint is not positive.
+    var strongPos = /thank you so much|very grateful|exceptional|kudos|well done|keep up the good|truly appreciate|deserves a raise|best services/.test(text);
+    var pos = strongPos || /compliment|commend|grateful|appreciate|helpful|helped|kindness|thanks to|thank you very much|very happy|thank you for (helping|your help|the help)/.test(text);
+    var strongNeg = /unacceptable|ridiculous|rude|dangerous|disgust|angry|\bsia\b|cannot tahan|wtf|sauna|bbq|kena|!!!/.test(text);
+    if (pos && !strongNeg && record.severity_level !== "high") return strongPos ? 5 : 4;
+    if (pos && strongPos && !strongNeg) return 4;
+    if (record.severity_level === "high") return strongNeg || /!!/.test(text) ? 1 : 2;
+    if (strongNeg) return 1;
+    if (record.severity_level === "medium") return 2;
+    return /\?|can i|may i|please advise|please clarify|suggest|would like to (check|know|enquire)/.test(text) ? 3 : 2;
+  }
+
+  function sevClass(level) { return "sev-" + (level || "low"); }
 
   function extractKeywords(text) {
     return INCIDENT_KEYWORD_PHRASES.filter(function (phrase) { return text.indexOf(phrase) !== -1; });
@@ -72,15 +167,17 @@
   // arrives faster than it can be processed.
   // ---------------------------------------------------------------------
   var STAGES = [
-    { key: "preprocess", label: "Pre-processing", detail: "Clean & normalise text", ms: [600, 1200],
+    { key: "preprocess", label: "Pre-processing", detail: "Clean & normalise text", kind: "rule", method: "Rule-based", ms: [600, 1200],
       apply: function () {} },
-    { key: "severity", label: "Severity model", detail: "High-severity terms", ms: [900, 1900],
+    { key: "severity", label: "Severity model", detail: "Few-shot LLM prompt", kind: "ai", method: "AI · LLM", ms: [900, 1900],
       apply: function (data, r) { Object.assign(r, detectSeverity(recordText(r))); } },
-    { key: "keywords", label: "Keyword / NER", detail: "Incident phrases", ms: [800, 1700],
+    { key: "keywords", label: "Keyword / NER", detail: "Few-shot LLM extraction", kind: "ai", method: "AI · LLM", ms: [800, 1700],
       apply: function (data, r) { r.keywords = extractKeywords(recordText(r)); } },
-    { key: "category", label: "Category classifier", detail: "Main category", ms: [600, 1400],
+    { key: "sentiment", label: "Sentiment index", detail: "TranSent-X (RoBERTa)", kind: "tx", method: "AI · RoBERTa", ms: [700, 1500],
+      apply: function (data, r) { r.sentiment = scoreSentiment(r); } },
+    { key: "category", label: "Category classifier", detail: "Trained SVC model", kind: "ml", method: "ML · SVC", ms: [600, 1400],
       apply: function (data, r) { r.main_category = categorize(recordText(r)); } },
-    { key: "assign", label: "Case assignment", detail: "Route & pick staff", ms: [500, 1000],
+    { key: "assign", label: "Case assignment", detail: "Route & pick staff", kind: "rule", method: "Rule-based", ms: [500, 1000],
       apply: function (data, r, nowMs) { assignCase(data, r, nowMs); } }
   ];
 
@@ -102,13 +199,16 @@
   //   5. then the fewest cases today                    (get_next_user)
   //   6. round-robin on last-assigned time              (get_next_user)
   // ---------------------------------------------------------------------
+  var TEAM_NAMES = { CR: "Customer Relations", CW: "Customer Welfare", ADMIN: "Admin" };
+  function teamName(code) { return TEAM_NAMES[code] || code; }
+
   function routeCase(record) {
     var social = record.source_at === "Social Media";
     if (record.main_category === "Lost and Found") return { team: "CW", skill: "lost_and_found", rule: "Lost and found enquiry" };
     if (record.main_category === "Compliment") return { team: "CR", skill: "compliment", rule: "Compliment" };
     if (social) return { team: "CR", skill: "feedback_reply_socialmedia", rule: "Feedback received via social media" };
     if (record.severity_level === "high") return { team: "CR", skill: "feedback_reply", rule: "High-severity feedback" };
-    return { team: "CW", skill: "feedback_reply", rule: "Low-severity feedback" };
+    return { team: "CW", skill: "feedback_reply", rule: record.severity_level === "medium" ? "Medium-severity feedback" : "Low-severity feedback" };
   }
 
   function sameDay(a, b) {
@@ -147,8 +247,8 @@
 
     eliminate(1,
       function (r) { return r.team === route.team && r.skills.indexOf(route.skill) !== -1; },
-      function (r) { return r.team !== route.team ? "Team " + r.team + " (needs " + route.team + ")" : "No " + route.skill + " skill"; });
-    steps.push({ label: "Team & skill", remaining: alive.length, note: route.team + " / " + route.skill });
+      function (r) { return r.team !== route.team ? teamName(r.team) + " (needs " + teamName(route.team) + ")" : "No " + route.skill + " skill"; });
+    steps.push({ label: "Team & skill", remaining: alive.length, note: teamName(route.team) + " / " + route.skill });
 
     eliminate(2, function (r) { return !r.onLeave; }, function () { return "On leave"; });
     steps.push({ label: "Not on leave", remaining: alive.length, note: "" });
@@ -197,47 +297,50 @@
   }
 
   // ---------------------------------------------------------------------
-  // Keyword burst detection. The real portal counts each keyword over the
-  // last N minutes and shows those above a minimum count. The demo adds a
-  // baseline so that a keyword only "bursts" when it is both frequent and
-  // unusually frequent:
-  //   threshold = max(min count, multiplier x mean count of previous windows)
-  //   burst     = count in current window >= threshold
+  // Keyword surge detection. Only reports whose AI severity is one of the
+  // selected levels (default: High only) are counted. A keyword surges when
+  // its count in the last N minutes reaches the threshold:
+  //   surge = count of selected-severity reports in window >= threshold
+  // A few earlier windows are counted too, purely for the history chart.
   // ---------------------------------------------------------------------
+  var HISTORY_WINDOWS = 6;
+  var SEVERITY_LABELS = { high: "High", medium: "Medium", low: "Low" };
+
+  function severityText(sevs) {
+    return sevs.map(function (v) { return SEVERITY_LABELS[v]; }).join(" + ");
+  }
+
   function evaluateBursts(data, nowMs) {
     var s = data.settings.burst;
     var W = s.windowMin * 60000;
-    var K = s.baselineWindows;
+    var K = HISTORY_WINDOWS;
     var start = nowMs - W * (K + 1);
+    var sevs = s.severities;
     var stats = {};
 
     data.feedback.forEach(function (rec) {
-      if (rec.status !== "processed") return;
+      if (rec.status !== "processed" || sevs.indexOf(rec.severity_level) === -1) return;
       var t = new Date(rec.createdon).getTime();
       if (t < start) return;
       (rec.keywords || []).forEach(function (k) {
         var st = stats[k];
         if (!st) {
-          st = stats[k] = { keyword: k, current: 0, baseline: [], records: [] };
-          for (var i = 0; i < K; i++) st.baseline.push(0);
+          st = stats[k] = { keyword: k, current: 0, history: [], records: [] };
+          for (var i = 0; i < K; i++) st.history.push(0);
         }
         if (t >= nowMs - W) {
           st.current += 1;
           st.records.push(rec.queue_guid);
         } else {
           var idx = Math.floor((nowMs - W - t) / W);
-          if (idx >= 0 && idx < K) st.baseline[K - 1 - idx] += 1;
+          if (idx >= 0 && idx < K) st.history[K - 1 - idx] += 1;
         }
       });
     });
 
     return Object.keys(stats).map(function (k) {
       var st = stats[k];
-      var sum = st.baseline.reduce(function (a, b) { return a + b; }, 0);
-      st.mean = K ? sum / K : 0;
-      st.expected = st.mean * s.multiplier;
-      st.threshold = Math.max(s.minCount, st.expected);
-      st.ratio = st.mean > 0 ? st.current / st.mean : null;
+      st.threshold = s.minCount;
       st.isBurst = st.current > 0 && st.current >= st.threshold;
       return st;
     }).sort(function (a, b) {
@@ -290,14 +393,13 @@
         triggeredon: at,
         count: ev.current,
         peakCount: ev.current,
-        mean: ev.mean,
         threshold: ev.threshold,
         windowMin: data.settings.burst.windowMin,
         records: ev.records.slice(),
         locations: uniqueLocations(data, ev.records),
         channels: channels,
         history: [
-          { at: at, text: "Burst detected: " + ev.current + " reports vs threshold " + fmtNum(ev.threshold) },
+          { at: at, text: "Surge detected: " + ev.current + " reports vs threshold " + fmtNum(ev.threshold) },
           { at: at, text: "Portal notification raised" },
           { at: at, text: "Mock email sent to " + DUTY_EMAIL }
         ]
@@ -324,7 +426,7 @@
     var f = fired[0];
     var text = f.escalated
       ? "Alert escalated: '" + f.alert.keyword + "' now " + f.alert.count + " reports"
-      : "Burst alert: '" + f.alert.keyword + "' - " + f.alert.count + " reports in " + f.alert.windowMin + " min. Mock email sent to " + DUTY_EMAIL;
+      : "Surge alert: '" + f.alert.keyword + "' - " + f.alert.count + " reports in " + f.alert.windowMin + " min. Mock email sent to " + DUTY_EMAIL;
     showToast(text, "alert");
     var bell = document.getElementById("alertBellBtn");
     bell.classList.remove("ring");
@@ -342,85 +444,22 @@
     { email: "farah@demo.local", name: "Farah Aziz", team: "CR", skills: ["feedback_reply", "feedback_reply_socialmedia", "compliment"] },
     { email: "chloe@demo.local", name: "Chloe Ng", team: "CW", skills: ["feedback_reply", "lost_and_found"] },
     { email: "daniel@demo.local", name: "Daniel Lee", team: "CW", skills: ["feedback_reply", "lost_and_found"], on_leave: true },
-    { email: "evan@demo.local", name: "Evan Goh", team: "CW", skills: ["feedback_reply"] }
+    { email: "evan@demo.local", name: "Evan Goh", team: "CW", skills: ["feedback_reply"] },
+    { email: "grace@demo.local", name: "Grace Koh", team: "CR", skills: ["feedback_reply", "compliment", "feedback_fyi"] },
+    { email: "hafiz@demo.local", name: "Hafiz Rahman", team: "CR", skills: ["feedback_reply", "feedback_reply_socialmedia"] },
+    { email: "irene@demo.local", name: "Irene Lau", team: "CR", skills: ["feedback_reply_socialmedia", "compliment"], on_leave: true },
+    { email: "jason@demo.local", name: "Jason Teo", team: "CW", skills: ["feedback_reply", "lost_and_found"] },
+    { email: "kavitha@demo.local", name: "Kavitha Raj", team: "CW", skills: ["feedback_reply", "lost_and_found", "feedback_fyi"] }
   ];
 
-  var SEED_SOURCE = [
-    ["Platform crowding at Bishan", "Severe platform crowding at Bishan MRT during peak hour. A passenger nearly fell near the platform edge.", "Bishan MRT", 8],
-    ["Escalator unavailable", "The escalator at Outram Park has been out of service since this morning.", "Outram Park MRT", 18],
-    ["Smoke smell in carriage", "Strong smoke smell reported inside a northbound train carriage. Please investigate urgently.", "Northbound train", 31],
-    ["Helpful station staff", "A staff member at Tampines was very helpful when I needed directions.", "Tampines MRT", 55],
-    ["Train door closed on bag", "The train door closed on a passenger's bag at Clementi and caused panic.", "Clementi MRT", 95],
-    ["Refund enquiry", "I was charged twice for the same trip and would like assistance with a refund.", "Online", 180],
-    ["Water leak near stairs", "Water is leaking near the stairs at City Hall and the floor is slippery.", "City Hall MRT", 420],
-    ["Lost blue backpack", "I left a blue backpack on the eastbound train this afternoon.", "Eastbound train", 900]
-  ];
-
-  // Occasional incidents mixed into the live feed.
-  var INCIDENT_TEMPLATES = [
-    { title: "Sudden crowding near platform edge", description: "Live monitoring detected severe platform crowding and a passenger nearly fell near the platform edge.", source_at: "Live IFS Feed", incident_at: "Jurong East MRT" },
-    { title: "Lift breakdown at station", description: "The passenger lift at the concourse has broken down (lift breakdown) and assistance is needed for a wheelchair user.", source_at: "Mobile App", incident_at: "Serangoon MRT" },
-    { title: "Smoke reported in train carriage", description: "Several passengers reported a smoke smell in a train carriage and requested urgent investigation.", source_at: "Live IFS Feed", incident_at: "North South Line" },
-    { title: "Water leak creating slippery floor", description: "Water is leaking beside the station stairs and the floor is slippery. A commuter almost fell.", source_at: "Station Report", incident_at: "City Hall MRT" },
-    { title: "Train breakdown causing delay", description: "A train breakdown on the East West Line has caused a long delay and the platform is becoming crowded.", source_at: "Live IFS Feed", incident_at: "Paya Lebar MRT" },
-    { title: "Suspicious bag left unattended", description: "A suspicious bag was found unattended near the ticketing gates and passengers are concerned.", source_at: "Station Report", incident_at: "Raffles Place MRT" },
-    { title: "Violent person on platform", description: "A violent person was seen shouting and pushing other commuters on the platform, causing panic.", source_at: "Social Media", incident_at: "Dhoby Ghaut MRT" },
-    { title: "Passenger fell on escalator", description: "A passenger fell on the escalator and appeared injured. Staff assistance was requested immediately.", source_at: "Web Form", incident_at: "Orchard MRT" }
-  ];
-
-  // Everyday feedback - deliberately free of incident phrases.
-  var ROUTINE_TEMPLATES = [
-    { title: "Air-con too cold in carriage", description: "The air-conditioning in the train carriage is far too cold this morning.", source_at: "Web Form", incident_at: "Circle Line" },
-    { title: "More seats at concourse", description: "More seating near the concourse would help elderly commuters waiting for friends.", source_at: "Email", incident_at: "Ang Mo Kio MRT" },
-    { title: "Compliment for train captain", description: "Thank you to the train captain for the clear and calm announcements.", source_at: "Mobile App", incident_at: "Downtown Line" },
-    { title: "Top-up machine not accepting notes", description: "The top-up machine at the ticket office is not accepting notes.", source_at: "Web Form", incident_at: "Bedok MRT" },
-    { title: "Charged incorrect fare", description: "I was charged an incorrect fare when tapping out at Bugis.", source_at: "Email", incident_at: "Bugis MRT" },
-    { title: "Umbrella left on train", description: "I left my umbrella on the Circle Line train. Can someone check lost and found?", source_at: "Web Form", incident_at: "Circle Line" },
-    { title: "Toilet needs cleaning", description: "The station toilet at Yishun needs more frequent cleaning.", source_at: "Social Media", incident_at: "Yishun MRT" },
-    { title: "Station Wi-Fi not working", description: "Free Wi-Fi at the station has not been working all week.", source_at: "Social Media", incident_at: "Kallang MRT" },
-    { title: "Clearer signage to bus interchange", description: "Signage to the bus interchange exit could be clearer for first-time visitors.", source_at: "Web Form", incident_at: "Boon Lay MRT" },
-    { title: "Helpful staff at Punggol", description: "The station staff at Punggol were very helpful with my stroller.", source_at: "Mobile App", incident_at: "Punggol MRT" },
-    { title: "Lift slow during peak", description: "The lift at Buangkok is very slow during peak hours.", source_at: "Web Form", incident_at: "Buangkok MRT" }
-  ];
-
-  // Clusters of near-simultaneous reports about the same incident.
-  var BURST_SCENARIOS = [
-    { keyword: "smoke", location: "Tanjong Pagar MRT", reports: [
-      ["Smoke on platform", "There is smoke coming out near the platform screen doors at Tanjong Pagar.", "Social Media"],
-      ["Smell of smoke in station", "Strong smell of smoke at the Tanjong Pagar concourse, people are coughing.", "Web Form"],
-      ["Smoke from tunnel?", "Saw smoke drifting out of the tunnel as the train pulled in.", "Mobile App"],
-      ["Urgent: smoke seen", "Passengers are moving away from the platform because of smoke.", "Live IFS Feed"],
-      ["Smoke near escalator", "Light smoke near the escalator to exit B, staff not around yet.", "Social Media"],
-      ["Is there a fire?", "Lots of smoke and a burning smell at Tanjong Pagar, is there a fire?", "Web Form"]
-    ] },
-    { keyword: "signal fault", location: "East West Line", reports: [
-      ["Train stuck due to signal fault", "Our train has been stopped for 10 minutes, the captain announced a signal fault.", "Social Media"],
-      ["Signal fault delay", "Signal fault between Bugis and Lavender, massive delay.", "Web Form"],
-      ["Another signal fault?", "Announcement says signal fault again. When will this be fixed?", "Mobile App"],
-      ["Stranded because of signal fault", "Stuck in the tunnel for 15 minutes because of a signal fault.", "Live IFS Feed"],
-      ["Signal fault - late for work", "The signal fault on the East West Line made me late for work.", "Email"],
-      ["Slow trains after signal fault", "Trains crawling after the signal fault, the platform is packed.", "Social Media"]
-    ] },
-    { keyword: "platform crowding", location: "Jurong East MRT", reports: [
-      ["Dangerous platform crowding", "Platform crowding at Jurong East is dangerous, people pushed near the edge.", "Social Media"],
-      ["Platform crowding again", "Platform crowding is terrible tonight, cannot even get off the train.", "Web Form"],
-      ["Severe platform crowding", "Severe platform crowding at the interchange, need crowd control.", "Mobile App"],
-      ["No staff for platform crowding", "No staff managing the platform crowding at Jurong East.", "Live IFS Feed"],
-      ["Platform crowding after delay", "After the delay the platform crowding became unbearable.", "Email"],
-      ["Crowd control needed", "Please send staff, platform crowding at Jurong East is out of hand.", "Social Media"]
-    ] },
-    { keyword: "escalator breakdown", location: "Bugis MRT", reports: [
-      ["Escalator breakdown at exit C", "Escalator breakdown at Bugis exit C, long queue for the stairs.", "Web Form"],
-      ["Another escalator breakdown", "Second escalator breakdown this week at Bugis.", "Social Media"],
-      ["Escalator breakdown - elderly stuck", "Escalator breakdown means elderly passengers cannot get up to the concourse.", "Mobile App"],
-      ["Queue due to escalator breakdown", "Huge queue because of the escalator breakdown.", "Live IFS Feed"],
-      ["Escalator breakdown reported", "Reporting an escalator breakdown near the ticketing gates at Bugis.", "Email"],
-      ["Please fix escalator breakdown", "The escalator breakdown at Bugis has lasted over an hour.", "Web Form"]
-    ] }
-  ];
+  // Sample feedback lives in samples.js so the sentiment dashboard can reuse it.
+  var SEED_SOURCE = window.AIDISA_SAMPLES.seeds;
+  var INCIDENT_TEMPLATES = window.AIDISA_SAMPLES.incidents;
+  var ROUTINE_TEMPLATES = window.AIDISA_SAMPLES.routines;
+  var BURST_SCENARIOS = window.AIDISA_SAMPLES.scenarios;
 
   function defaultSettings() {
-    return { speed: "normal", burst: { windowMin: 15, baselineWindows: 4, minCount: 3, multiplier: 2 } };
+    return { speed: "normal", burst: { windowMin: 15, minCount: 3, severities: ["high"] } };
   }
 
   function seedData() {
@@ -433,8 +472,8 @@
         createdon: new Date(created).toISOString(),
         receivedon: new Date(created).toISOString(),
         title: item[0],
-        description: item[1],
-        source_at: index % 3 === 0 ? "Social Media" : "Web Form",
+        description: fillTokens(item[1], created),
+        source_at: item[4] || (index % 3 === 0 ? "Social Media" : "Web Form"),
         incident_at: item[2],
         record_origin: "sample"
       };
@@ -443,6 +482,39 @@
       record.processedon = new Date(processed).toISOString();
       data.feedback.unshift(record);
     });
+
+    // Default bursts so the Alerts button and the incident count have
+    // something to show on first load: [scenario keyword, report indexes,
+    // minutes-ago for each report].
+    var seq = 0;
+    [
+      ["burning smell", [0, 1, 2, 3], [11, 8, 5, 2]],
+      ["track fault", [0, 2, 3], [13, 9, 4]],
+      ["train door", [0, 1, 3], [12, 7, 3]]
+    ].forEach(function (b) {
+      var sc = BURST_SCENARIOS.find(function (x) { return x.keyword === b[0]; });
+      b[1].forEach(function (ri, i) {
+        var created = Date.now() - b[2][i] * 60000;
+        var processed = created + rand(3500, 6500);
+        var rep = sc.reports[ri];
+        seq += 1;
+        var record = {
+          queue_guid: "DEMO-BURST-" + seq,
+          createdon: new Date(created).toISOString(),
+          receivedon: new Date(created).toISOString(),
+          title: rep[0],
+          description: fillTokens(rep[1], created),
+          source_at: rep[2],
+          incident_at: sc.location,
+          record_origin: "sample"
+        };
+        STAGES.forEach(function (stage) { stage.apply(data, record, processed); });
+        record.status = "processed";
+        record.processedon = new Date(processed).toISOString();
+        data.feedback.unshift(record);
+      });
+    });
+    runAlerting(data, Date.now());
     return data;
   }
 
@@ -452,6 +524,17 @@
       if (raw) {
         var parsed = JSON.parse(raw);
         if (parsed && parsed.feedback && parsed.settings) {
+          // Older saves used a baseline/multiplier rule; keep window + threshold.
+          var b = parsed.settings.burst || {};
+          parsed.settings.burst = {
+            windowMin: b.windowMin || 15,
+            minCount: b.minCount || 3,
+            severities: Array.isArray(b.severities) && b.severities.length ? b.severities : ["high"]
+          };
+          // Add any staff introduced since this save was made.
+          SEED_USERS.forEach(function (u) {
+            if (!parsed.users.some(function (x) { return x.email === u.email; })) parsed.users.push(JSON.parse(JSON.stringify(u)));
+          });
           catchUpClock(parsed);
           return parsed;
         }
@@ -505,7 +588,7 @@
       createdon: createdOnIso || new Date(now).toISOString(),
       receivedon: new Date(now).toISOString(),
       title: incoming.title,
-      description: incoming.description,
+      description: fillTokens(incoming.description, now),
       source_at: incoming.source_at || "Manual Input",
       incident_at: incoming.incident_at || "Not specified",
       record_origin: incoming.record_origin || "live-generated",
@@ -515,10 +598,6 @@
     trimRecords(data);
     saveData(data);
     renderDashboard();
-
-    var tag = document.getElementById("lastEventTag");
-    tag.textContent = "Received: " + record.title;
-    tag.className = "tag";
     return record;
   }
 
@@ -664,26 +743,86 @@
     var data = state.data;
     var processed = processedRecords(data);
     var inPipeline = data.feedback.length - processed.length;
-    var high = processed.filter(function (f) { return f.severity_level === "high"; }).length;
     var openAlerts = data.alerts.filter(function (a) { return a.status !== "resolved"; }).length;
 
-    var recent = processed.filter(function (f) { return f.record_origin !== "sample"; }).slice(0, 20);
-    var latency = recent.length
-      ? recent.reduce(function (sum, f) { return sum + (new Date(f.processedon) - new Date(f.receivedon)); }, 0) / recent.length
-      : null;
-
-    document.getElementById("statReceived").textContent = data.feedback.length;
-    document.getElementById("statQueue").textContent = inPipeline;
-    document.getElementById("statProcessed").textContent = processed.length;
-    document.getElementById("statHigh").textContent = high;
-    document.getElementById("statAlerts").textContent = openAlerts;
-    document.getElementById("statLatency").textContent = latency === null ? "-" : fmtSeconds(latency);
+    renderOverview(processed, inPipeline, openAlerts);
 
     var badge = document.getElementById("alertBadge");
     var active = data.alerts.filter(function (a) { return a.status === "active"; }).length;
     badge.textContent = openAlerts;
-    badge.classList.toggle("hidden", openAlerts === 0);
     badge.classList.toggle("badge-active", active > 0);
+  }
+
+  // User-facing overview: incident counts, active alerts, the top issue and a
+  // heartbeat line of the last hour (all feedback vs critical incidents).
+  function renderOverview(processed, inPipeline, openAlerts) {
+    var data = state.data;
+    var now = Date.now();
+    var HOUR = 3600000;
+    var inLast = function (f, from, to) {
+      var t = new Date(f.createdon).getTime();
+      return t >= from && t < to;
+    };
+    var hour = processed.filter(function (f) { return inLast(f, now - HOUR, now + 1); });
+    var crit = hour.filter(function (f) { return f.severity_level === "high"; });
+
+    // Incidents = burst incidents: alerts triggered in the last hour.
+    var bursts = data.alerts.filter(function (a) { return inLast({ createdon: a.triggeredon }, now - HOUR, now + 1); });
+    var incEl = document.getElementById("ovIncidents");
+    document.getElementById("ovIncidentsValue").textContent = bursts.length;
+    incEl.classList.toggle("ov-danger", bursts.length > 0);
+    var reports = bursts.reduce(function (n, a) { return n + a.count; }, 0);
+    document.getElementById("ovIncidentsSub").textContent = bursts.length
+      ? reports + " reports · " + bursts[0].keyword + " at " + (bursts[0].locations[0] || "multiple locations")
+      : "No incident surges detected";
+
+    var open = data.alerts.filter(function (a) { return a.status !== "resolved"; });
+    // Top issue follows the bursts: the open alert with the most reports,
+    // falling back to the busiest keyword when nothing is bursting.
+    var topAlert = open.slice().sort(function (x, y) {
+      return (y.level === "critical") - (x.level === "critical") || y.count - x.count;
+    })[0];
+    var top = topAlert ? null : evaluateBursts(data, now).filter(function (e) { return e.current > 0; })[0];
+    document.getElementById("ovTopValue").textContent = topAlert ? topAlert.keyword : (top ? top.keyword : "None");
+    document.getElementById("ovTopSub").textContent = topAlert
+      ? topAlert.count + " reports in " + data.settings.burst.windowMin + " min · " + (topAlert.locations[0] || "multiple locations")
+      : (top
+        ? top.current + " report" + (top.current > 1 ? "s" : "") + " in " + data.settings.burst.windowMin + " min · below threshold"
+        : "No " + severityText(data.settings.burst.severities) + "-severity incidents in the current window");
+    document.getElementById("ovTopIssue").classList.toggle("ov-danger", !!topAlert);
+
+    document.getElementById("ovFeedbackValue").textContent = hour.length;
+    document.getElementById("ovFeedbackSub").textContent = inPipeline
+      ? inPipeline + " being analysed by AI now"
+      : "All analysed and routed";
+
+    renderHeartbeat(hour, now);
+  }
+
+  function renderHeartbeat(hour, now) {
+    var N = 20, STEP = 3 * 60000, start = now - N * STEP;
+    var all = [], crit = [];
+    for (var i = 0; i < N; i++) { all.push(0); crit.push(0); }
+    hour.forEach(function (f) {
+      var idx = Math.floor((new Date(f.createdon).getTime() - start) / STEP);
+      if (idx < 0 || idx >= N) return;
+      all[idx] += 1;
+      if (f.severity_level === "high") crit[idx] += 1;
+    });
+    var max = Math.max(2, Math.max.apply(null, all));
+    var W = 600, H = 80, pad = 6;
+    function pts(arr) {
+      return arr.map(function (v, i) {
+        return (i * W / (N - 1)).toFixed(1) + "," + (H - pad - v / max * (H - 2 * pad)).toFixed(1);
+      });
+    }
+    var a = pts(all), c = pts(crit);
+    document.getElementById("hbChart").innerHTML =
+      '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none" role="img" aria-label="Feedback and critical incidents over the last hour">' +
+      '<line x1="0" y1="' + (H - pad) + '" x2="' + W + '" y2="' + (H - pad) + '" class="hb-base"/>' +
+      '<polygon points="0,' + (H - pad) + " " + a.join(" ") + " " + W + "," + (H - pad) + '" class="hb-area"/>' +
+      '<polyline points="' + a.join(" ") + '" class="hb-line-all"/>' +
+      '<polyline points="' + c.join(" ") + '" class="hb-line-crit"/></svg>';
   }
 
   function renderPipeline() {
@@ -708,8 +847,9 @@
     }
     state.pipelineSignature = signature;
 
-    function column(title, sub, body, cls) {
-      return '<div class="pipe-col ' + (cls || "") + '"><div class="pipe-head"><div class="pipe-title">' + escapeHtml(title) +
+    function column(title, sub, body, cls, stage) {
+      var badge = stage ? '<span class="method method-' + stage.kind + '">' + escapeHtml(stage.method) + "</span>" : "";
+      return '<div class="pipe-col ' + (cls || "") + '"><div class="pipe-head">' + badge + '<div class="pipe-title">' + escapeHtml(title) +
         '</div><div class="pipe-sub">' + escapeHtml(sub) + '</div></div><div class="pipe-body">' + body + "</div></div>";
     }
 
@@ -724,17 +864,17 @@
       var body = "";
       if (current && current.stage === i) {
         var sev = current.severity_level
-          ? ' <span class="' + (current.severity_level === "high" ? "sev-high" : "sev-low") + '">' + current.severity_level.toUpperCase() + "</span>"
+          ? ' <span class="' + sevClass(current.severity_level) + '">' + current.severity_level.toUpperCase() + "</span>"
           : "";
         body = '<div class="chip chip-active" data-guid="' + escapeHtml(current.queue_guid) + '"><div class="chip-title">' +
           escapeHtml(current.title) + '</div><div class="chip-meta">stage ' + (i + 1) + "/" + STAGES.length + sev +
           '</div><div class="chip-progress"><span id="activeProgress"></span></div></div>';
       }
-      html += column(stage.label, stage.detail, body, current && current.stage === i ? "active" : "");
+      html += column(stage.label, stage.detail, body, current && current.stage === i ? "active" : "", stage);
     });
     html += column("Processed", "On dashboard", done.map(function (f) {
       return '<div class="chip chip-done" data-guid="' + escapeHtml(f.queue_guid) + '"><div class="chip-title">' + escapeHtml(f.title) +
-        '</div><div class="chip-meta"><span class="' + (f.severity_level === "high" ? "sev-high" : "sev-low") + '">' +
+        '</div><div class="chip-meta"><span class="' + sevClass(f.severity_level) + '">' +
         f.severity_level.toUpperCase() + "</span> &middot; " + fmtSeconds(new Date(f.processedon) - new Date(f.receivedon)) + "</div></div>";
     }).join(""), "done");
 
@@ -831,7 +971,7 @@
 
     var container = document.getElementById("surgeChart");
     if (!entries.length) {
-      container.innerHTML = '<div class="chart-empty">No incident keywords in the last ' + s.windowMin + ' min. Try "Simulate incident burst".</div>';
+      container.innerHTML = '<div class="chart-empty">No incident keywords in the last ' + s.windowMin + ' min. Try "Simulate incident surge".</div>';
       return;
     }
 
@@ -842,7 +982,7 @@
         '<div class="hbar-track"><div class="hbar-fill' + (e.isBurst ? " burst" : "") + '" style="width:' + (e.current / scale) * 100 + '%"></div>' +
         '<div class="hbar-threshold" style="left:' + (e.threshold / scale) * 100 + '%"></div></div>' +
         '<div class="hbar-count">' + e.current + "</div>" +
-        '<div class="hbar-state">' + (e.isBurst ? '<span class="pill pill-burst">BURST</span>' : "") + "</div></div>";
+        '<div class="hbar-state">' + (e.isBurst ? '<span class="pill pill-burst">SURGE</span>' : "") + "</div></div>";
     }).join("");
   }
 
@@ -855,15 +995,15 @@
     var list = document.getElementById("alertList");
 
     if (!open.length && !resolved.length) {
-      list.innerHTML = '<div class="chart-empty small">No burst alerts. An alert fires when a keyword\'s count in the last ' +
-        data.settings.burst.windowMin + ' min reaches max(min count, multiplier &times; baseline). Try "Simulate incident burst".</div>';
+      list.innerHTML = '<div class="chart-empty small">No surge alerts. An alert fires when a keyword gets ' + data.settings.burst.minCount + ' or more ' +
+        severityText(data.settings.burst.severities) + '-severity reports within ' + data.settings.burst.windowMin + ' min. Try "Simulate incident surge".</div>';
       return;
     }
 
     function item(a) {
       var ev = live[a.keyword];
       var trend = a.status === "resolved" ? "" : (ev && ev.isBurst
-        ? '<span class="pill pill-burst">still bursting</span>'
+        ? '<span class="pill pill-burst">still surging</span>'
         : '<span class="pill">subsided</span>');
       var actions = a.status === "resolved" ? "" :
         (a.status === "active" ? '<button class="btn btn-small" data-action="ack" data-id="' + a.id + '">Acknowledge</button>' : "") +
@@ -873,10 +1013,11 @@
         '<span class="alert-kw">' + escapeHtml(a.keyword) + "</span>" +
         '<span class="pill pill-status">' + a.status + "</span>" + trend +
         '<span class="alert-time">' + fmtTime(a.triggeredon) + " &middot; " + timeAgo(a.triggeredon) + "</span></div>" +
-        '<div class="alert-body">' + a.count + " reports in " + a.windowMin + " min &middot; baseline " + fmtNum(a.mean) +
-        "/window &middot; threshold " + fmtNum(a.threshold) +
+        '<div class="alert-body">' + a.count + " reports in " + data.settings.burst.windowMin + " min &middot; threshold " + fmtNum(a.threshold) +
         (a.escalations ? " &middot; escalated " + a.escalations + "&times;" : "") +
         "<br>Locations: " + escapeHtml(a.locations.join(", ")) +
+        '<br><b>Suggested action:</b> ' + escapeHtml(suggestedAction(a)) +
+        (detectionLatency(state.data, a) ? "<br>Detected " + fmtSeconds(detectionLatency(state.data, a).ms) + " after the first report (manual review: up to " + MANUAL_REVIEW_MIN + " min)" : "") +
         '<br>Notified: ' + a.channels.map(function (c) { return '<span class="channel">' + escapeHtml(c) + "</span>"; }).join(" ") + "</div>" +
         '<div class="alert-actions"><button class="btn btn-small" data-action="reports" data-id="' + a.id + '">View reports</button>' +
         '<button class="btn btn-small" data-action="explain" data-id="' + a.id + '">How was this detected?</button>' + actions + "</div></div>";
@@ -895,7 +1036,7 @@
       var mine = processed.filter(function (f) { return f.assigned_to === u.email; });
       var today = mine.filter(function (f) { return sameDay(new Date(f.assigned_on), now); });
       var hour = today.filter(function (f) { return new Date(f.assigned_on).getHours() === now.getHours(); });
-      return "<tr><td>" + escapeHtml(u.name) + "</td><td>" + u.team + '</td><td class="skills">' +
+      return "<tr><td>" + escapeHtml(u.name) + "</td><td>" + teamName(u.team) + '</td><td class="skills">' +
         u.skills.map(function (s) { return '<span class="skill">' + escapeHtml(s) + "</span>"; }).join(" ") + "</td>" +
         '<td><label class="leave-toggle"><input type="checkbox" data-email="' + escapeHtml(u.email) + '"' + (u.on_leave ? " checked" : "") +
         "> on leave</label></td><td>" + hour.length + "</td><td>" + today.length + "</td><td>" + mine.length + "</td></tr>";
@@ -907,14 +1048,14 @@
       var status, severity, assigned;
       if (record.status === "processed") {
         status = '<span class="pill pill-ok">Processed</span>';
-        severity = '<span class="' + (record.severity_level === "high" ? "sev-high" : "sev-low") + '">' + record.severity_level.toUpperCase() + "</span>";
+        severity = '<span class="' + sevClass(record.severity_level) + '">' + record.severity_level.toUpperCase() + "</span>";
         assigned = record.assigned_to ? escapeHtml(staffName(data, record.assigned_to)) : '<span class="muted">No eligible staff</span>';
       } else {
         status = record.status === "queued"
           ? '<span class="pill">Queued</span>'
           : '<span class="pill pill-busy">' + escapeHtml(STAGES[record.stage].label) + "</span>";
         severity = record.severity_level
-          ? '<span class="' + (record.severity_level === "high" ? "sev-high" : "sev-low") + '">' + record.severity_level.toUpperCase() + "</span>"
+          ? '<span class="' + sevClass(record.severity_level) + '">' + record.severity_level.toUpperCase() + "</span>"
           : '<span class="muted">-</span>';
         assigned = '<span class="muted">Pending</span>';
       }
@@ -951,10 +1092,14 @@
     var select = document.getElementById("explainKeyword");
     var container = document.getElementById("burstExplain");
 
+    document.getElementById("settingsExample").innerHTML =
+      "<b>With your current settings:</b> only reports the AI rated <b>" + severityText(s.severities) + "</b> are counted. " +
+      "A keyword surges when it gets <b>" + s.minCount + " or more</b> of those reports within the last <b>" + s.windowMin + " min</b>.";
+
     if (!evals.length) {
       setOptions(select, [["", "Auto"]], "");
-      container.innerHTML = '<div class="chart-empty">No incident keywords in the last ' + (s.windowMin * (s.baselineWindows + 1)) +
-        ' min yet. Generate events or simulate a burst.</div>';
+      container.innerHTML = '<div class="chart-empty">No ' + severityText(s.severities) + '-severity incident keywords in the last ' +
+        (s.windowMin * (HISTORY_WINDOWS + 1)) + ' min yet. Generate events or simulate a surge.</div>';
       document.getElementById("burstTable").innerHTML = "";
       return;
     }
@@ -967,20 +1112,18 @@
     })), keywordLost ? "" : state.explainKeyword);
 
     var verdict = ev.isBurst
-      ? '<span class="pill pill-burst">BURST</span> ' + ev.current + " &ge; " + fmtNum(ev.threshold) + " &rarr; alert raised or escalated"
-      : '<span class="pill">normal</span> ' + ev.current + " &lt; " + fmtNum(ev.threshold) + " &rarr; no alert";
+      ? '<span class="pill pill-burst">SURGE</span> ' + ev.current + " &ge; " + fmtNum(ev.threshold) + " &rarr; alert raised or escalated"
+      : '<span class="pill">below threshold</span> ' + ev.current + " &lt; " + fmtNum(ev.threshold) + " &rarr; no alert";
 
     container.innerHTML =
       '<div class="explain-grid"><div>' + burstChartSvg(ev, s) +
-      '<div class="legend"><span class="lg lg-base"></span>previous windows <span class="lg lg-cur"></span>current window ' +
-      '<span class="lg lg-mean"></span>baseline mean <span class="lg lg-thresh"></span>alert threshold</div></div>' +
+      '<div class="legend"><span class="lg lg-base"></span>earlier windows (context only) <span class="lg lg-cur"></span>current window ' +
+      '<span class="lg lg-thresh"></span>alert threshold</div></div>' +
       '<ol class="steps">' +
-      "<li><b>Count</b> processed reports mentioning <code>" + escapeHtml(ev.keyword) + "</code> in the last " + s.windowMin +
+      "<li><b>Filter</b>: keep only reports the AI rated <b>" + severityText(s.severities) + "</b> severity.</li>" +
+      "<li><b>Count</b> those reports mentioning <code>" + escapeHtml(ev.keyword) + "</code> in the last " + s.windowMin +
       " min: <b>" + ev.current + "</b></li>" +
-      "<li><b>Baseline</b> from the " + s.baselineWindows + " windows before that: [" + ev.baseline.join(", ") +
-      "] &rarr; mean <b>" + fmtNum(ev.mean) + "</b> per window</li>" +
-      "<li><b>Threshold</b> = max(min count " + s.minCount + ", " + fmtNum(s.multiplier) + " &times; " + fmtNum(ev.mean) +
-      " = " + fmtNum(ev.expected) + ") = <b>" + fmtNum(ev.threshold) + "</b></li>" +
+      "<li><b>Threshold</b>: <b>" + fmtNum(ev.threshold) + "</b> reports, set in the Event Surge Tracker.</li>" +
       "<li><b>Compare</b>: " + verdict + "</li>" +
       "<li><b>De-duplicate</b>: one open alert per keyword. More reports escalate it; after it is resolved a new alert needs new reports.</li>" +
       "</ol></div>" +
@@ -992,17 +1135,17 @@
       }).join("") || '<div class="muted">None</div>') + "</div>";
 
     document.getElementById("burstTable").innerHTML =
-      "<thead><tr><th>Keyword</th><th>Now</th><th>Previous windows</th><th>Mean</th><th>Threshold</th><th>vs normal</th><th>State</th></tr></thead><tbody>" +
+      "<thead><tr><th>Keyword</th><th>Now</th><th>Earlier windows</th><th>Threshold</th><th>State</th></tr></thead><tbody>" +
       evals.map(function (e) {
         return '<tr data-keyword="' + escapeHtml(e.keyword) + '"' + (e.keyword === ev.keyword ? ' class="selected"' : "") + "><td>" +
-          escapeHtml(e.keyword) + "</td><td>" + e.current + "</td><td>" + e.baseline.join(" &middot; ") + "</td><td>" + fmtNum(e.mean) +
-          "</td><td>" + fmtNum(e.threshold) + "</td><td>" + (!e.current ? "-" : e.ratio === null ? "new" : e.ratio.toFixed(1) + "&times;") +
-          "</td><td>" + (e.isBurst ? '<span class="pill pill-burst">BURST</span>' : '<span class="muted">normal</span>') + "</td></tr>";
+          escapeHtml(e.keyword) + "</td><td>" + e.current + "</td><td>" + e.history.join(" &middot; ") +
+          "</td><td>" + fmtNum(e.threshold) +
+          "</td><td>" + (e.isBurst ? '<span class="pill pill-burst">SURGE</span>' : '<span class="muted">below threshold</span>') + "</td></tr>";
       }).join("") + "</tbody>";
   }
 
   function burstChartSvg(ev, s) {
-    var values = ev.baseline.concat([ev.current]);
+    var values = ev.history.concat([ev.current]);
     var maxV = Math.max(ev.threshold, Math.max.apply(null, values), 1) * 1.25;
     var W = 640, H = 250, padL = 34, padR = 118, padT = 14, padB = 42;
     var plotW = W - padL - padR, plotH = H - padT - padB;
@@ -1018,22 +1161,30 @@
       out.push('<text class="axis" x="' + (padL - 6) + '" y="' + (y(g) + 4) + '" text-anchor="end">' + g + "</text>");
     }
 
-    var K = s.baselineWindows;
+    var K = HISTORY_WINDOWS;
+    var now = Date.now();
+    // Label each window by its start time; skip labels when bars get narrow
+    // so they never overlap. The current window is always labelled.
+    var every = Math.max(1, Math.ceil(46 / slot));
+    function clock(ms) {
+      var d = new Date(ms);
+      return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    }
     values.forEach(function (v, i) {
       var x = padL + slot * i + (slot - barW) / 2;
       var isCur = i === n - 1;
       var cls = isCur ? (ev.isBurst ? "b-burst" : "b-current") : "b-base";
       out.push('<rect class="' + cls + '" x="' + x + '" y="' + y(v) + '" width="' + barW + '" height="' + Math.max(0, y(0) - y(v)) + '" rx="3"/>');
       out.push('<text class="val" x="' + (x + barW / 2) + '" y="' + (y(v) - 5) + '" text-anchor="middle">' + v + "</text>");
-      var label = isCur ? "last " + s.windowMin + "m" : "-" + (K + 1 - i) * s.windowMin + " to -" + (K - i) * s.windowMin + "m";
-      out.push('<text class="axis" x="' + (x + barW / 2) + '" y="' + (padT + plotH + 16) + '" text-anchor="middle">' + label + "</text>");
+      var showLabel = isCur || ((n - 1 - i) % every === 0 && (n - 1 - i) >= every);
+      if (showLabel) {
+        var label = isCur ? "now" : clock(now - (K + 1 - i) * s.windowMin * 60000);
+        out.push('<text class="axis' + (isCur ? " axis-now" : "") + '" x="' + (x + barW / 2) + '" y="' + (padT + plotH + 16) + '" text-anchor="middle">' + label + "</text>");
+      }
     });
-    out.push('<text class="axis" x="' + (padL + plotW / 2) + '" y="' + (H - 4) + '" text-anchor="middle">time window (minutes before now)</text>');
+    out.push('<text class="axis" x="' + (padL + plotW / 2) + '" y="' + (H - 4) + '" text-anchor="middle">start of each ' + s.windowMin + '-min window</text>');
 
-    var yMean = y(ev.mean), yThr = y(ev.threshold);
-    var meanLabelY = Math.abs(yMean - yThr) < 14 ? yThr + 16 : yMean + 4;
-    out.push('<line class="l-mean" x1="' + padL + '" x2="' + (padL + plotW) + '" y1="' + yMean + '" y2="' + yMean + '"/>');
-    out.push('<text class="l-mean-t" x="' + (padL + plotW + 6) + '" y="' + meanLabelY + '">mean ' + fmtNum(ev.mean) + "</text>");
+    var yThr = y(ev.threshold);
     out.push('<line class="l-thresh" x1="' + padL + '" x2="' + (padL + plotW) + '" y1="' + yThr + '" y2="' + yThr + '"/>');
     out.push('<text class="l-thresh-t" x="' + (padL + plotW + 6) + '" y="' + (yThr + 4) + '">threshold ' + fmtNum(ev.threshold) + "</text>");
 
@@ -1084,7 +1235,7 @@
       else outcome = '<span class="muted">still in</span>';
       var skillMatch = r.skills.indexOf(t.route.skill) !== -1;
       return '<tr class="' + (out ? "row-out" : "") + (isChosen && reveal >= t.steps.length - 1 ? " row-chosen" : "") + '"><td>' +
-        escapeHtml(r.name) + "</td><td" + (r.team === t.route.team ? "" : ' class="miss"') + ">" + r.team + "</td><td" +
+        escapeHtml(r.name) + "</td><td" + (r.team === t.route.team ? "" : ' class="miss"') + ">" + teamName(r.team) + "</td><td" +
         (skillMatch ? "" : ' class="miss"') + ">" + (skillMatch ? "yes" : "no") + "</td><td" + (r.onLeave ? ' class="miss"' : "") + ">" +
         (r.onLeave ? "yes" : "no") + "</td><td>" + r.hourCount + "</td><td>" + r.dayCount + "</td><td>" +
         (r.lastAssigned ? new Date(r.lastAssigned).toLocaleTimeString() : "-") + "</td><td>" + outcome + "</td></tr>";
@@ -1092,9 +1243,9 @@
 
     container.innerHTML =
       '<div class="case-summary"><b>' + escapeHtml(record.title) + "</b> &middot; " +
-      '<span class="' + (record.severity_level === "high" ? "sev-high" : "sev-low") + '">' + record.severity_level.toUpperCase() + "</span> &middot; " +
+      '<span class="' + sevClass(record.severity_level) + '">' + record.severity_level.toUpperCase() + "</span> &middot; " +
       escapeHtml(record.main_category) + " &middot; via " + escapeHtml(record.source_at) + "</div>" +
-      '<div class="route">Routing rule: <b>' + escapeHtml(t.route.rule) + '</b> &rarr; team <span class="skill">' + t.route.team +
+      '<div class="route">Routing rule: <b>' + escapeHtml(t.route.rule) + '</b> &rarr; team <span class="skill">' + teamName(t.route.team) +
       '</span> with skill <span class="skill">' + escapeHtml(t.route.skill) + "</span></div>" +
       '<div class="funnel">' + funnel + "</div>" +
       '<div class="table-wrap"><table class="explain-table"><thead><tr><th>Staff</th><th>Team</th><th>Has skill</th><th>On leave</th>' +
@@ -1147,6 +1298,9 @@
   // Dialogs + toast
   // ---------------------------------------------------------------------
   function openDialog(title, rows, explain) {
+    document.getElementById("detailBody").classList.remove("hidden");
+    document.getElementById("reportBody").classList.add("hidden");
+    document.getElementById("detailDialog").classList.remove("report-dialog");
     document.getElementById("detailTitle").textContent = title;
     document.getElementById("detailBody").innerHTML = rows.map(function (r) {
       return "<dt>" + escapeHtml(r[0]) + "</dt><dd>" + (r[2] ? r[1] : escapeHtml(r[1])) + "</dd>";
@@ -1168,12 +1322,22 @@
       ["Received", new Date(record.receivedon).toLocaleString()]
     ];
     if (processed) rows.push(["Processing time", fmtSeconds(new Date(record.processedon) - new Date(record.receivedon))]);
-    rows.push(["Description", record.description], ["Source", record.source_at], ["Location", record.incident_at]);
+    var matched = record.keyevent_monitor_matched ? record.keyevent_monitor_matched.split(", ") : [];
+    var terms = matched.concat(record.keywords || []);
+    rows.push(["Description", processed ? highlightTerms(record.description, terms) : escapeHtml(record.description), true]);
+    rows.push(["Source", record.source_at], ["Location", record.incident_at]);
     rows.push(["Severity", record.severity_level ? record.severity_level.toUpperCase() : "Pending"]);
-    rows.push(["Keywords", record.keywords ? (record.keywords.join(", ") || "-") : "Pending"]);
-    rows.push(["Category", record.main_category || "Pending"]);
     if (processed) {
-      rows.push(["Routed to", record.assign_trace ? "Team " + record.assign_trace.route.team + " / " + record.assign_trace.route.skill : "-"]);
+      rows.push(["AI severity reason", matched.length
+        ? "Rated " + record.severity_level.toUpperCase() + ": matched " + matched.join(", ")
+        : "Rated LOW: no high or medium severity terms found"]);
+    }
+    rows.push(["Keywords", record.keywords ? (record.keywords.join(", ") || "-") : "Pending"]);
+    rows.push(["Sentiment (TranSent-X)", record.sentiment ? record.sentiment + " - " + SENTIMENT_NAMES[record.sentiment] : "Pending"]);
+    rows.push(["Category", record.main_category || "Pending"]);
+    if (processed && record.assign_trace) rows.push(["AI routing reason", record.assign_trace.route.rule]);
+    if (processed) {
+      rows.push(["Routed to", record.assign_trace ? teamName(record.assign_trace.route.team) + " / " + record.assign_trace.route.skill : "-"]);
       rows.push(["Assigned to", record.assigned_to ? staffName(data, record.assigned_to) : "No eligible staff"]);
     } else {
       rows.push(["Assigned to", "Pending"]);
@@ -1181,35 +1345,57 @@
     rows.push(["Queue GUID", record.queue_guid]);
     openDialog(record.title, rows, record.assign_trace ? {
       label: "Why this staff member?",
-      run: function () { state.explainCase = record.queue_guid; switchTab("howto"); renderAssignExplainer(); scrollToId("assignCard"); }
+      run: function () { state.explainCase = record.queue_guid; switchTab("assignment"); renderAssignExplainer(); scrollToId("assignCard"); }
     } : null);
   }
 
   function showAlertDetail(alert) {
     var data = state.data;
-    var reports = alert.records.map(function (g) {
-      var r = findRecord(data, g);
-      return r ? escapeHtml(fmtTime(r.createdon) + " - " + r.title + " (" + r.source_at + ")") : "";
-    }).filter(Boolean).join("<br>");
-    var history = alert.history.map(function (h) { return escapeHtml(fmtTime(h.at) + " - " + h.text); }).join("<br>");
-    openDialog("Burst alert: " + alert.keyword, [
-      ["Level", alert.level.toUpperCase()],
-      ["Status", alert.status],
-      ["Triggered", new Date(alert.triggeredon).toLocaleString()],
-      ["Reports", alert.count + " in " + alert.windowMin + " min (threshold " + fmtNum(alert.threshold) + ")"],
-      ["Locations", alert.locations.join(", ")],
-      ["Notified", alert.channels.join(", ")],
-      ["Timeline", history, true],
-      ["Linked reports", reports || "-", true]
-    ], {
-      label: "How was this detected?",
-      run: function () { explainKeyword(alert.keyword); }
-    });
+    var lat = detectionLatency(data, alert);
+    var linked = alert.records.map(function (g) { return findRecord(data, g); }).filter(Boolean)
+      .sort(function (x, y) { return new Date(x.createdon) - new Date(y.createdon); });
+
+    var html =
+      '<div class="rp-head">' +
+        '<span class="pill pill-' + alert.level + '">' + alert.level.toUpperCase() + "</span>" +
+        '<span class="pill pill-status">' + escapeHtml(alert.status) + "</span>" +
+        '<span class="rp-when">Triggered ' + escapeHtml(fmtTime(alert.triggeredon)) + " &middot; " + escapeHtml(timeAgo(alert.triggeredon)) + "</span>" +
+      "</div>" +
+      '<div class="rp-action"><b>Suggested action</b>' + escapeHtml(suggestedAction(alert)) + "</div>" +
+      '<div class="rp-stats">' +
+        '<div><b>' + alert.count + '</b><span>reports in ' + data.settings.burst.windowMin + ' min</span><em>threshold ' + escapeHtml(fmtNum(alert.threshold)) + "</em></div>" +
+        '<div><b>' + (lat ? escapeHtml(fmtSeconds(lat.ms)) : "-") + '</b><span>to detect</span><em>manual review: up to ' + MANUAL_REVIEW_MIN + " min</em></div>" +
+        '<div><b>' + alert.channels.length + '</b><span>channels notified</span><em>' + escapeHtml(alert.channels.join(", ")) + "</em></div>" +
+      "</div>" +
+      '<h4 class="rp-h">Locations</h4><div class="rp-chips">' +
+        alert.locations.map(function (l) { return '<span class="channel">' + escapeHtml(l) + "</span>"; }).join("") + "</div>" +
+      '<h4 class="rp-h">Timeline</h4><ol class="rp-timeline">' +
+        alert.history.map(function (h) {
+          return "<li><time>" + escapeHtml(fmtTime(h.at)) + "</time><span>" + escapeHtml(h.text) + "</span></li>";
+        }).join("") + "</ol>" +
+      '<h4 class="rp-h">Linked reports (' + linked.length + ')</h4><ul class="rp-reports">' +
+        (linked.map(function (r) {
+          return "<li><time>" + escapeHtml(fmtTime(r.createdon)) + "</time><div><b>" + escapeHtml(r.title) + "</b>" +
+            '<span>' + escapeHtml(r.source_at) + " &middot; " + escapeHtml(r.incident_at) + "</span></div></li>";
+        }).join("") || "<li>No linked reports</li>") + "</ul>";
+
+    document.getElementById("detailTitle").textContent = "Surge alert: " + alert.keyword;
+    document.getElementById("detailBody").classList.add("hidden");
+    var body = document.getElementById("reportBody");
+    body.innerHTML = html;
+    body.classList.remove("hidden");
+    var dlg = document.getElementById("detailDialog");
+    dlg.classList.add("report-dialog");
+    var btn = document.getElementById("detailExplainBtn");
+    btn.classList.remove("hidden");
+    btn.textContent = "How was this detected?";
+    btn.onclick = function () { dlg.close(); explainKeyword(alert.keyword); };
+    dlg.showModal();
   }
 
   function explainKeyword(keyword) {
     state.explainKeyword = keyword;
-    switchTab("howto");
+    switchTab("situational");
     renderBurstExplainer();
     scrollToId("burstCard");
   }
@@ -1234,8 +1420,26 @@
     });
     document.getElementById("situationalView").classList.toggle("hidden", tab !== "situational");
     document.getElementById("assignmentView").classList.toggle("hidden", tab !== "assignment");
-    document.getElementById("howtoView").classList.toggle("hidden", tab !== "howto");
+    document.getElementById("sentimentView").classList.toggle("hidden", tab !== "sentiment");
+    // The live-feed bar only drives the portal views.
+    document.getElementById("liveBarOk").classList.toggle("hidden", tab === "sentiment");
+    if (tab === "sentiment") {
+      var frame = document.getElementById("sentimentFrame");
+      if (!frame.getAttribute("src")) frame.setAttribute("src", "dashboard/index.html");
+      sizeSentimentFrame();
+    }
   }
+
+  // The dashboard is a separate static page shown in an iframe so its own
+  // styles and scaling stay isolated; it fills the space below the header.
+  function sizeSentimentFrame() {
+    var header = document.querySelector(".topbar");
+    var h = window.innerHeight - (header ? header.getBoundingClientRect().bottom : 0);
+    document.getElementById("sentimentFrame").style.height = Math.max(400, h) + "px";
+  }
+  window.addEventListener("resize", function () {
+    if (state.activeTab === "sentiment") sizeSentimentFrame();
+  });
 
   // ---------------------------------------------------------------------
   // Live feed controls (mirrors the real demo's DemoLiveBar behaviour)
@@ -1256,8 +1460,13 @@
     receiveFeedback(pickTemplate(), createdOnIso);
   }
 
-  function simulateBurst() {
-    var scenario = BURST_SCENARIOS[Math.floor(Math.random() * BURST_SCENARIOS.length)];
+  function simulateBurst(chosen) {
+    var sevs = state.data.settings.burst.severities;
+    var pool = BURST_SCENARIOS.filter(function (sc) {
+      return sevs.indexOf(detectSeverity((sc.reports[0][0] + " " + sc.reports[0][1]).toLowerCase()).severity_level) !== -1;
+    });
+    if (!pool.length) pool = BURST_SCENARIOS;
+    var scenario = chosen && chosen.reports ? chosen : pool[Math.floor(Math.random() * pool.length)];
     var count = 5 + Math.floor(Math.random() * 2);
     var delay = 0;
     for (var i = 0; i < count; i++) {
@@ -1293,17 +1502,22 @@
   function readBurstSettings() {
     var s = state.data.settings.burst;
     s.windowMin = Math.max(1, Number(document.getElementById("burstWindow").value) || 15);
-    s.baselineWindows = Math.max(1, Math.min(12, Number(document.getElementById("burstBaseline").value) || 4));
     s.minCount = Math.max(1, Number(document.getElementById("burstMinCount").value) || 3);
-    s.multiplier = Math.max(1, Number(document.getElementById("burstMultiplier").value) || 2);
+    var sevs = ["high", "medium", "low"].filter(function (v) { return document.getElementById("sev_" + v).checked; });
+    if (!sevs.length) {
+      sevs = ["high"];
+      document.getElementById("sev_high").checked = true;
+    }
+    s.severities = sevs;
   }
 
   function writeSettingsToInputs() {
     var s = state.data.settings;
     document.getElementById("burstWindow").value = s.burst.windowMin;
-    document.getElementById("burstBaseline").value = s.burst.baselineWindows;
     document.getElementById("burstMinCount").value = s.burst.minCount;
-    document.getElementById("burstMultiplier").value = s.burst.multiplier;
+    ["high", "medium", "low"].forEach(function (v) {
+      document.getElementById("sev_" + v).checked = s.burst.severities.indexOf(v) !== -1;
+    });
     document.getElementById("speedSelect").value = s.speed;
   }
 
@@ -1370,12 +1584,24 @@
     });
 
     document.getElementById("alertBellBtn").addEventListener("click", function () {
-      switchTab("situational");
-      scrollToId("alertsCard");
+      document.getElementById("alertsDialog").showModal();
+    });
+    // Close any popup when the click lands outside its box (on the backdrop).
+    document.querySelectorAll("dialog").forEach(function (dlg) {
+      dlg.addEventListener("click", function (e) {
+        if (e.target !== dlg) return;
+        var r = dlg.getBoundingClientRect();
+        var inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+        if (!inside) dlg.close();
+      });
+    });
+
+    document.getElementById("alertsCloseBtn").addEventListener("click", function () {
+      document.getElementById("alertsDialog").close();
     });
 
     document.getElementById("generateNowBtn").addEventListener("click", generateNow);
-    document.getElementById("burstBtn").addEventListener("click", simulateBurst);
+    document.getElementById("burstBtn").addEventListener("click", function () { simulateBurst(); });
 
     document.getElementById("liveToggle").addEventListener("change", function (e) {
       setLive(e.target.checked);
@@ -1391,16 +1617,26 @@
     });
 
     ["trendInterval", "trendWindow"].forEach(function (id) {
-      document.getElementById(id).addEventListener("change", renderTrend);
+      document.getElementById(id).addEventListener("input", renderTrend);
     });
 
-    ["burstWindow", "burstBaseline", "burstMinCount", "burstMultiplier"].forEach(function (id) {
-      document.getElementById(id).addEventListener("change", function () {
+    // Surge settings update the charts on every keystroke / spinner click.
+    // Alerting runs shortly after the user stops typing, so a half-typed
+    // value (e.g. "1" on the way to "15") doesn't raise alerts.
+    var alertingTimer = null;
+    ["burstWindow", "burstMinCount", "sev_high", "sev_medium", "sev_low"].forEach(function (id) {
+      var el = document.getElementById(id);
+      el.addEventListener(el.type === "checkbox" ? "change" : "input", function () {
         readBurstSettings();
-        var fired = runAlerting(state.data, Date.now());
         saveData(state.data);
         renderAll();
-        announceAlerts(fired);
+        clearTimeout(alertingTimer);
+        alertingTimer = setTimeout(function () {
+          var fired = runAlerting(state.data, Date.now());
+          if (fired.length) saveData(state.data);
+          renderAll();
+          announceAlerts(fired);
+        }, 700);
       });
     });
 
@@ -1431,9 +1667,11 @@
         alert.resolvedon = at;
         alert.history.push({ at: at, text: "Resolved by Demo Admin" });
       } else if (action === "reports") {
+        document.getElementById("alertsDialog").close();
         showAlertDetail(alert);
         return;
       } else if (action === "explain") {
+        document.getElementById("alertsDialog").close();
         explainKeyword(alert.keyword);
         return;
       }
@@ -1491,7 +1729,6 @@
       saveData(state.data);
       writeSettingsToInputs();
       renderAll();
-      document.getElementById("lastEventTag").className = "tag hidden";
       showToast("Demo data restored");
     });
 

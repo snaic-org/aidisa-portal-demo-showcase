@@ -48,6 +48,10 @@ html, body { margin: 0; background: var(--page); color: var(--ink); font-family:
   overflow: hidden;
 }
 .page { position: absolute; inset: 0; }
+/* Overview content starts at y=64 in canvas units (the old header row is
+   gone); pull it up so it sits 16 units from the top. */
+.canvas.is-overview { height: calc(672 * var(--u)); }
+.canvas.is-overview #pageOverview { top: calc(-48 * var(--u)); bottom: auto; height: calc(720 * var(--u)); }
 .page[hidden] { display: none; }
 
 /* Absolutely positioned visual */
@@ -247,3 +251,6 @@ table.pbi td.num { text-align: right; }
 @media (max-width: 760px) {
   .rotate-hint { display: inline; }
 }
+
+/* Inside the portal tab the portal header already provides navigation. */
+.embedded .topstrip { display: none; }

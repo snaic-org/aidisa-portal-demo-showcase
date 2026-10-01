@@ -33,18 +33,17 @@
 
     <header class="topbar">
       <div class="topbar-left">
-        <span class="brand-mark">AIDISA</span>
+        <span class="brand-mark">AiDiSA</span>
         <span class="badge-demo">DEMO &middot; synthetic data</span>
       </div>
       <nav class="tabs">
         <button class="tab-btn active" data-tab="situational">Situational Awareness</button>
         <button class="tab-btn" data-tab="assignment">Case Assignment</button>
-        <button class="tab-btn" data-tab="howto">How it works</button>
-        <a class="tab-btn tab-link" href="dashboard/index.html">Sentiment Dashboard &#8599;</a>
+        <button class="tab-btn" data-tab="sentiment">Sentiment Dashboard</button>
       </nav>
       <div class="topbar-right">
-        <button id="alertBellBtn" class="btn btn-ghost bell" title="Open burst alerts">
-          Alerts <span id="alertBadge" class="bell-badge hidden">0</span>
+        <button id="alertBellBtn" class="btn btn-ghost bell" title="Open surge alerts">
+          Alerts <span id="alertBadge" class="bell-badge">0</span>
         </button>
         <button id="resetDemoBtn" class="btn btn-ghost">Reset demo</button>
         <button id="logoutBtn" class="btn btn-ghost">Log out</button>
@@ -55,7 +54,6 @@
       <div class="live-bar-left">
         <span class="dot" id="liveDot"></span>
         <span id="liveStatusText">Live feed paused</span>
-        <span id="lastEventTag" class="tag hidden"></span>
       </div>
       <div class="live-bar-right">
         <label class="inline-field">Generate every
@@ -81,43 +79,37 @@
           </select>
         </label>
         <button id="generateNowBtn" class="btn btn-primary">Generate now</button>
-        <button id="burstBtn" class="btn btn-danger">Simulate incident burst</button>
+        <button id="burstBtn" class="btn btn-danger">Simulate incident surge</button>
       </div>
     </div>
 
     <!-- ---------- Situational Awareness ---------- -->
     <section id="situationalView" class="view">
-      <div class="stat-row">
-        <div class="stat-card"><div class="stat-value" id="statReceived">0</div><div class="stat-label">Feedback received</div></div>
-        <div class="stat-card"><div class="stat-value" id="statQueue">0</div><div class="stat-label">In processing pipeline</div></div>
-        <div class="stat-card"><div class="stat-value" id="statProcessed">0</div><div class="stat-label">Feedback processed</div></div>
-        <div class="stat-card"><div class="stat-value" id="statHigh">0</div><div class="stat-label">High-severity feedback</div></div>
-        <div class="stat-card"><div class="stat-value" id="statAlerts">0</div><div class="stat-label">Open burst alerts</div></div>
-        <div class="stat-card"><div class="stat-value" id="statLatency">-</div><div class="stat-label">Avg processing time (last 20)</div></div>
-      </div>
-
-      <div class="card" id="alertsCard">
-        <h3>Burst Alerts</h3>
-        <p class="card-sub">Raised automatically when an incident keyword spikes above its normal rate. Email and SMS are mocked, and nothing is sent.</p>
-        <div id="alertList" class="alert-list"></div>
-      </div>
-
-      <div class="card">
-        <div class="card-head">
-          <h3>Processing Pipeline</h3>
-          <div class="card-controls">
-            <span id="pipelineStatus" class="pipe-status"></span>
-            <label>Speed
-              <select id="speedSelect">
-                <option value="fast">Fast</option>
-                <option value="normal">Normal</option>
-                <option value="slow">Slow</option>
-              </select>
-            </label>
-          </div>
+      <div class="stat-row overview-row">
+        <div class="stat-card ov-card" id="ovIncidents">
+          <div class="stat-label">Incidents in the last hour (surges)</div>
+          <div class="stat-value" id="ovIncidentsValue">0</div>
+          <div class="ov-sub" id="ovIncidentsSub"></div>
         </div>
-        <p class="card-sub">Feedback is received first and queued. One backend worker processes each record through every stage. Charts, alerts and assignment only update after the last stage finishes.</p>
-        <div id="pipeline" class="pipeline"></div>
+        <div class="stat-card ov-card" id="ovTopIssue">
+          <div class="stat-label">Top issue right now</div>
+          <div class="stat-value ov-text" id="ovTopValue">None</div>
+          <div class="ov-sub" id="ovTopSub"></div>
+        </div>
+        <div class="stat-card ov-card">
+          <div class="stat-label">Feedback in the last hour</div>
+          <div class="stat-value" id="ovFeedbackValue">0</div>
+          <div class="ov-sub" id="ovFeedbackSub"></div>
+        </div>
+      </div>
+
+      <div class="card heartbeat-card">
+        <div class="card-head">
+          <h3>Incident Heartbeat <span class="hb-sub">last 60 min</span></h3>
+        </div>
+        <div id="hbChart" class="hb-chart"></div>
+        <div class="hb-axis"><span>60 min ago</span><span>30 min</span><span>now</span></div>
+        <div class="hb-legend"><span class="hb-key hb-key-all"></span>All feedback <span class="hb-key hb-key-crit"></span>Critical incidents</div>
       </div>
 
       <div class="card-grid">
@@ -137,13 +129,16 @@
           <div class="card-head">
             <h3>Event Surge Tracker</h3>
             <div class="card-controls wrap">
-              <label>Window (min) <input type="number" id="burstWindow" min="1" value="15" class="num-input" /></label>
-              <label>Baseline windows <input type="number" id="burstBaseline" min="1" max="12" value="4" class="num-input" /></label>
-              <label>Min count <input type="number" id="burstMinCount" min="1" value="3" class="num-input" /></label>
-              <label>Multiplier <input type="number" id="burstMultiplier" min="1" step="0.5" value="2" class="num-input" /></label>
+              <label title="How far back &quot;right now&quot; looks. Reports in this many minutes are the current count.">Window (min) <input type="number" id="burstWindow" min="1" value="15" class="num-input" /></label>
+              <label title="How many reports of the same keyword, inside the window, raise a surge alert.">Threshold <input type="number" id="burstMinCount" min="1" value="3" class="num-input" /></label>
+              <span class="sev-filter" title="Which AI severity ratings count towards a surge.">Count
+                <label><input type="checkbox" id="sev_high" checked /> High</label>
+                <label><input type="checkbox" id="sev_medium" /> Medium</label>
+                <label><input type="checkbox" id="sev_low" /> Low</label>
+              </span>
             </div>
           </div>
-          <p class="card-sub">Incident keywords in the current window. The black tick is each keyword's alert threshold. Click a row to see how it was scored.</p>
+          <p class="card-sub">Incident keywords in the current window, counting only the severities ticked above. The black tick is the alert threshold.</p>
           <div id="surgeChart" class="chart chart-hbars"></div>
         </div>
       </div>
@@ -157,6 +152,60 @@
             <tbody></tbody>
           </table>
         </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>Processing Pipeline</h3>
+          <div class="card-controls">
+            <span id="pipelineStatus" class="pipe-status"></span>
+            <label>Speed
+              <select id="speedSelect">
+                <option value="fast">Fast</option>
+                <option value="normal">Normal</option>
+                <option value="slow">Slow</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <p class="card-sub">Feedback is received first and queued. One backend worker processes each record through every stage. Charts, alerts and assignment only update after the last stage finishes.</p>
+        <div id="pipeline" class="pipeline"></div>
+        <div class="method-legend">
+          <div><span class="method method-ai">AI &middot; LLM</span><b>Severity &amp; NER</b> &ndash; a large language model with few-shot prompts rates severity and pulls out incident keywords and locations from free text (emails, chats, call notes).</div>
+          <div><span class="method method-tx">AI &middot; RoBERTa</span><b>Sentiment index</b> &ndash; <b>TranSent-X</b> (Transport Sentiment Experience), our RoBERTa model fine-tuned on transport feedback, scores each report from 1 Very Negative to 5 Very Positive. The Sentiment Dashboard averages these scores into the Sentiment Intensity index.</div>
+          <div><span class="method method-ml">ML &middot; SVC</span><b>Category</b> &ndash; a support vector classifier trained on past cases assigns the main category.</div>
+          <div><span class="method method-rule">Rule-based</span><b>Pre-processing &amp; assignment</b> &ndash; deterministic cleaning, then routing by team, skill, leave and workload.</div>
+        </div>
+      </div>
+
+      <div class="card intro">
+        <h3>How AIDISA handles a piece of feedback</h3>
+        <ol class="flow">
+          <li><b>Receive</b>: feedback arrives from IFS, web forms or social media and joins a queue.</li>
+          <li><b>Process</b>: a worker runs pre-processing, the severity model, keyword/NER extraction and category classification.</li>
+          <li><b>Assign</b>: the case is routed to a team and skill, then given to the least-loaded available staff member.</li>
+          <li><b>Detect surges</b>: reports the AI rated High severity (adjustable) are counted per keyword; when a keyword reaches the threshold within the window, a surge alert is raised.</li>
+        </ol>
+        <p class="card-sub">These explainers use the same live data as the panels above, so try "Simulate incident surge" and watch them update.</p>
+      </div>
+
+      <div class="card" id="burstCard">
+        <div class="card-head">
+          <h3>Event surge detection</h3>
+          <div class="card-controls"><label>Keyword <select id="explainKeyword"></select></label></div>
+        </div>
+        <p class="card-sub">Are enough serious reports about the same thing coming in right now? Settings come from the Event Surge Tracker.</p>
+        <div class="settings-help" id="settingsHelp">
+          <h4>How a surge is decided</h4>
+          <dl>
+            <dt>Count</dt><dd>Which <b>AI severity ratings</b> count. Default is <b>High only</b>, so routine complaints never trigger a surge. Tick Medium to also watch service issues such as lift faults or no aircon.</dd>
+            <dt>Window (min)</dt><dd>How far back &ldquo;right now&rdquo; looks. Reports in the last this-many minutes are counted.</dd>
+            <dt>Threshold</dt><dd>How many of those reports about the <b>same keyword</b> raise an alert. Lower it to be warned sooner; raise it to cut noise.</dd>
+          </dl>
+          <p class="settings-example" id="settingsExample"></p>
+        </div>
+        <div id="burstExplain"></div>
+        <div class="table-wrap"><table id="burstTable" class="explain-table clickable"></table></div>
       </div>
     </section>
 
@@ -182,30 +231,6 @@
           </table>
         </div>
       </div>
-    </section>
-
-    <!-- ---------- How it works ---------- -->
-    <section id="howtoView" class="view hidden">
-      <div class="card intro">
-        <h3>How AIDISA handles a piece of feedback</h3>
-        <ol class="flow">
-          <li><b>Receive</b>: feedback arrives from IFS, web forms or social media and joins a queue.</li>
-          <li><b>Process</b>: a worker runs pre-processing, the severity model, keyword/NER extraction and category classification.</li>
-          <li><b>Assign</b>: the case is routed to a team and skill, then given to the least-loaded available staff member.</li>
-          <li><b>Detect bursts</b>: keyword counts are compared against their recent baseline, and spikes raise an alert.</li>
-        </ol>
-        <p class="card-sub">These explainers use the same data as the dashboard, so try "Simulate incident burst" and watch them update.</p>
-      </div>
-
-      <div class="card" id="burstCard">
-        <div class="card-head">
-          <h3>Event burst detection</h3>
-          <div class="card-controls"><label>Keyword <select id="explainKeyword"></select></label></div>
-        </div>
-        <p class="card-sub">Is this keyword unusually frequent right now? Thresholds come from the Event Surge Tracker settings.</p>
-        <div id="burstExplain"></div>
-        <div class="table-wrap"><table id="burstTable" class="explain-table clickable"></table></div>
-      </div>
 
       <div class="card" id="assignCard">
         <div class="card-head">
@@ -215,17 +240,32 @@
             <button id="replayBtn" class="btn btn-primary btn-small">Replay step by step</button>
           </div>
         </div>
-        <p class="card-sub">Mirrors <code>get_next_user()</code> in the AIDISA backend. Each filter narrows the staff list until one person is left.</p>
         <div id="assignExplain"></div>
       </div>
     </section>
+
+    <!-- ---------- Sentiment Dashboard ---------- -->
+    <section id="sentimentView" class="view sentiment-view hidden">
+      <iframe id="sentimentFrame" class="sentiment-frame" title="Sentiment analysis dashboard"></iframe>
+    </section>
   </div>
+
+  <!-- ---------- Burst alerts dialog ---------- -->
+  <dialog id="alertsDialog" class="detail-dialog alerts-dialog">
+    <div class="card-head">
+      <h3>Surge Alerts</h3>
+      <button id="alertsCloseBtn" class="btn btn-primary" type="button">Close</button>
+    </div>
+    <p class="card-sub">Raised automatically when enough High-severity reports about the same incident arrive within the window. Email and SMS are mocked, and nothing is sent.</p>
+    <div id="alertList" class="alert-list"></div>
+  </dialog>
 
   <!-- ---------- Detail dialog ---------- -->
   <dialog id="detailDialog" class="detail-dialog">
     <form method="dialog">
       <h3 id="detailTitle"></h3>
       <dl id="detailBody" class="detail-list"></dl>
+      <div id="reportBody" class="report hidden"></div>
       <div class="dialog-actions">
         <button id="detailExplainBtn" class="btn btn-ghost hidden" type="button"></button>
         <button class="btn btn-primary" type="submit">Close</button>
@@ -235,6 +275,7 @@
 
   <div id="toast" class="toast hidden"></div>
 
+  <script src="samples.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
