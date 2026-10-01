@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="icon" href="data:," />
-  <title>AIDISA Portal &mdash; Live Demo</title>
+  <title>AIDISA Portal - Live Demo</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -13,7 +13,7 @@
   <div id="loginView" class="login-screen">
     <div class="login-card">
       <div class="brand">AIDISA Portal</div>
-      <p class="demo-flag">DEMO ONLY &mdash; all data is synthetic, no real/live data is fetched</p>
+      <p class="demo-flag">DEMO ONLY - all data is synthetic, no real/live data is fetched</p>
       <form id="loginForm">
         <label>Email
           <input id="loginEmail" type="text" value="admin@demo.local" autocomplete="username" />
@@ -23,8 +23,6 @@
         </label>
         <button type="submit" class="btn btn-primary btn-block">Log in</button>
       </form>
-      <p class="hint">Any password works &mdash; this demo never checks credentials against a real server.</p>
-      <a class="dash-link" href="dashboard/index.html">View the sentiment analysis dashboard &rarr;</a>
     </div>
   </div>
 
@@ -171,10 +169,10 @@
         <p class="card-sub">Feedback is received first and queued. One backend worker processes each record through every stage. Charts, alerts and assignment only update after the last stage finishes.</p>
         <div id="pipeline" class="pipeline"></div>
         <div class="method-legend">
-          <div><span class="method method-ai">AI &middot; LLM</span><b>Severity &amp; NER</b> &ndash; a large language model with few-shot prompts rates severity and pulls out incident keywords and locations from free text (emails, chats, call notes).</div>
-          <div><span class="method method-tx">AI &middot; RoBERTa</span><b>Sentiment index</b> &ndash; <b>TranSent-X</b> (Transport Sentiment Experience), our RoBERTa model fine-tuned on transport feedback, scores each report from 1 Very Negative to 5 Very Positive. The Sentiment Dashboard averages these scores into the Sentiment Intensity index.</div>
-          <div><span class="method method-ml">ML &middot; SVC</span><b>Category</b> &ndash; a support vector classifier trained on past cases assigns the main category.</div>
-          <div><span class="method method-rule">Rule-based</span><b>Pre-processing &amp; assignment</b> &ndash; deterministic cleaning, then routing by team, skill, leave and workload.</div>
+          <div><span class="method method-ai">AI &middot; LLM</span><b>Severity &amp; NER</b> - a large language model with few-shot prompts rates severity and pulls out incident keywords and locations from free text (emails, chats, call notes).</div>
+          <div><span class="method method-tx">AI &middot; RoBERTa</span><b>Sentiment index</b> - <b>TranSent-X</b> (Transport Sentiment Experience), our RoBERTa model fine-tuned on transport feedback, scores each report from 1 Very Negative to 5 Very Positive. The Sentiment Dashboard averages these scores into the Sentiment Intensity index.</div>
+          <div><span class="method method-ml">ML &middot; SVC</span><b>Category</b> - a support vector classifier trained on past cases assigns the main category.</div>
+          <div><span class="method method-rule">Rule-based</span><b>Pre-processing &amp; assignment</b> - deterministic cleaning, then routing by team, skill, leave and workload.</div>
         </div>
       </div>
 

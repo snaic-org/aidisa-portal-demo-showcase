@@ -1,4 +1,4 @@
-# AIDISA Portal &mdash; GitHub Pages Demo
+# AIDISA Portal - GitHub Pages Demo
 
 A standalone, fully static, public showcase of the AIDISA Portal concept,
 hosted on GitHub Pages.
@@ -37,11 +37,11 @@ Then open http://localhost:4173.
 2. Push a change to `main` (or run the **Deploy GitHub Pages demo** workflow
    manually from the Actions tab).
 3. The workflow at `.github/workflows/gh-pages-demo.yml` publishes the repo
-   root as-is &mdash; no build step is needed.
+   root as-is - no build step is needed.
 
 ## Files
 
-- `index.html` &mdash; page structure and layout
-- `styles.css` &mdash; styling (no external CSS framework)
-- `app.js` &mdash; demo data store (localStorage), classifier, chart rendering,
+- `index.html` - page structure and layout
+- `styles.css` - styling (no external CSS framework)
+- `app.js` - demo data store (localStorage), classifier, chart rendering,
   and event handlers

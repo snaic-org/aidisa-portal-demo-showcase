@@ -596,7 +596,7 @@
     // Esri street tiles need no API key and serve pages opened from disk too.
     L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
       maxZoom: 18,
-      attribution: "Tiles &copy; Esri &mdash; Esri, HERE, Garmin, OpenStreetMap contributors"
+      attribution: "Tiles &copy; Esri - Esri, HERE, Garmin, OpenStreetMap contributors"
     }).addTo(map);
     map.setView([1.3521, 103.8198], 11);
     bubbleLayer = L.layerGroup().addTo(map);

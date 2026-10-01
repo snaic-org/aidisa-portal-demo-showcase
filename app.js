@@ -7,7 +7,10 @@
 (function () {
   "use strict";
 
-  var STORAGE_KEY = "aidisa-pages-demo-v2";
+  // Bumped when the saved data shape or sample set changes, so returning
+  // visitors get the current seed data instead of an incompatible old save.
+  var STORAGE_KEY = "aidisa-pages-demo-v3";
+  var OLD_STORAGE_KEYS = ["aidisa-pages-demo-v2"];
   var AUTH_KEY = "aidisa-pages-demo-auth";
   var LIVE_KEY = "aidisa-pages-demo-live";
   var MAX_RECORDS = 400;
@@ -519,6 +522,7 @@
   }
 
   function loadData() {
+    try { OLD_STORAGE_KEYS.forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { /* ignore */ }
     try {
       var raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
@@ -773,7 +777,8 @@
     incEl.classList.toggle("ov-danger", bursts.length > 0);
     var reports = bursts.reduce(function (n, a) { return n + a.count; }, 0);
     document.getElementById("ovIncidentsSub").textContent = bursts.length
-      ? reports + " reports · " + bursts[0].keyword + " at " + (bursts[0].locations[0] || "multiple locations")
+      ? reports + " reports across " + bursts.length + " surge" + (bursts.length > 1 ? "s" : "") +
+        " · latest: " + bursts[0].keyword + " at " + (bursts[0].locations[0] || "multiple locations")
       : "No incident surges detected";
 
     var open = data.alerts.filter(function (a) { return a.status !== "resolved"; });
